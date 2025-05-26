@@ -27,7 +27,7 @@ setup(
     description="A metadata construction and FAISS indexing library.",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/metadataconstruct",  # optional
+    url="https://github.com/Chinhvn113/MealsretrivevalDatabase.git",  # optional
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

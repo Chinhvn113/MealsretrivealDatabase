@@ -9,3 +9,13 @@ After that install database library
 cd MealsretrievalDatabase
 pip install -e .
 ```
+Simple use:
+```python
+from database import FAISSmanager, set_all_seed, build_transform, dynamic_preprocess, load_image
+set_all_seed(42)
+faissmanager = FAISSmanager()
+faissmanager.build('data/root')
+result = faissmanager.search(query_type = 'text', query ='hello world')
+```
+
+

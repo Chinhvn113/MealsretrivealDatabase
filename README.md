@@ -6,6 +6,6 @@ pip install -e .
 ```
 After that install database library
 ```bash
-cd Database
+cd MealsretrievalDatabase
 pip install -e .
 ```

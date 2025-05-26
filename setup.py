@@ -12,6 +12,11 @@ setup(
         "faiss-gpu",  # or faiss-cpu depending on your target
         "tqdm",
         "numpy",
+        "transformers",
+        "einops",
+        "timm",
+        "accelerate",
+        "bitsandbytes"
     ],
     author="Chinhcachep",
     description="A metadata construction and FAISS indexing library.",

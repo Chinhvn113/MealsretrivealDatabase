@@ -16,7 +16,12 @@ setup(
         "einops",
         "timm",
         "accelerate",
-        "bitsandbytes"
+        "bitsandbytes",
+        "scikit-learn",
+        "scipy",
+        "pandas",
+        "pymilvus",
+        "qdrant-client"
     ],
     author="Chinhcachep",
     description="A metadata construction and FAISS indexing library.",

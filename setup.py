@@ -11,7 +11,7 @@ setup(
         "Pillow",
         "faiss-gpu",  # or faiss-cpu depending on your target
         "tqdm",
-        "numpy",
+        "numpy<2.0",
         "transformers",
         "einops",
         "timm",

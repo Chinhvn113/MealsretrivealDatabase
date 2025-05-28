@@ -119,20 +119,60 @@ class MilvusManager:
         ])
 
         
-    def search(self, query, query_type="text", top_k=5):
+    def search(
+        self,
+        query,
+        mode="text2img",
+        top_k=5,
+        filter_expr=None,
+        text_field="main_news"  # or "thumbnail"
+    ):
         """
-        Perform a similarity search
+        Multimodal search with metadata filtering support.
+
+        Args:
+            query (str or path): text or image depending on mode.
+            mode (str): "text2text", "text2img", or "img2img"
+            top_k (int): number of top matches to return
+            filter_expr (str): optional metadata filter (Milvus expr syntax)
+            text_field (str): for text2text mode only, choose "main_news" or "thumbnail"
         """
-        query_vector = self.encode_text(query) if query_type == "text" else self.encode_image(query)
         self.collection.load()
+
+        if mode == "text2text":
+            query_vector = self.encode_text(query)
+            if text_field == "main_news":
+                search_field = "main_news_embedding"
+                output_fields = ["main_news_metadata", "ocr_info", "ocr_metadata"]
+            elif text_field == "thumbnail":
+                search_field = "thumbnail_embedding"
+                output_fields = ["thumbnail_metadata", "ocr_info", "ocr_metadata"]
+            else:
+                raise ValueError("Invalid text_field: choose 'main_news' or 'thumbnail'")
+
+        elif mode == "text2img":
+            query_vector = self.encode_text(query)
+            search_field = "image_embedding"
+            output_fields = ["image_metadata", "ocr_info", "ocr_metadata"]
+
+        elif mode == "img2img":
+            query_vector = self.encode_image(query)
+            search_field = "image_embedding"
+            output_fields = ["image_metadata", "ocr_info", "ocr_metadata"]
+
+        else:
+            raise ValueError("Invalid mode: choose 'text2text', 'text2img', or 'img2img'")
+
         results = self.collection.search(
             data=[query_vector.tolist()],
-            anns_field="embedding",
+            anns_field=search_field,
             param={"metric_type": "IP", "params": {}},
             limit=top_k,
-            output_fields=["metadata"]
+            expr=filter_expr,
+            output_fields=output_fields
         )
-        return results[0]
+        return results[0] if results else []
+
 
     def get_tag(self, image_path):
         transform = get_transform(image_size=self.image_size)

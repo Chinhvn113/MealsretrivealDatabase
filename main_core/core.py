@@ -1,4 +1,5 @@
-from numpy import random, np
+import numpy as np
+import random
 import torch
 from transformers import set_seed
 

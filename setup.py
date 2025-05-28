@@ -21,7 +21,7 @@ setup(
         "scipy",
         "pandas",
         "pymilvus",
-        "qdrant-client"
+        "qdrant-client",
         "fairscale"
     ],
     author="Chinhcachep",

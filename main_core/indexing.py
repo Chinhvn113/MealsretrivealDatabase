@@ -417,17 +417,17 @@ class FAISSManager:
         
         if search_in == "image":
             index = self.image_index
-            object_dirs = self.image_object_dirs
+            object_dirs = self.image_metadata
             # object_root = self.image_object_root
             limit = top_k * 7
         elif search_in == "text":
             index = self.text_index
-            object_dirs = self.text_object_dirs
+            object_dirs = self.text_metadata
             # object_root = self.text_object_root
             limit = top_k * 7
         elif search_in == "mean pooling images":
             index = self.mean_pooling_image_index
-            object_dirs = self.mean_pooling_image_dirs
+            object_dirs = self.mean_pooling_image_metadata
             # object_root = self.mean_pooling_image_root
             limit = top_k
         else:
@@ -442,7 +442,7 @@ class FAISSManager:
             if idx == -1:
                 continue
             hits.append({
-                "object_dir": object_dirs[idx],
+                "metadata": object_dirs[idx],
                 "confidence": dist,
                 # "object_root": object_root[idx]
             })

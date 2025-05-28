@@ -11,8 +11,8 @@ pip install -e .
 ```
 Simple use:
 ```python
-from database import FAISSManager, set_all_seed, build_transform, dynamic_preprocess, load_image
-set_all_seed(42)
+from database import FAISSManager, set_all_seeds, build_transform, dynamic_preprocess, load_image
+set_all_seeds(42)
 faissmanager = FAISSManager()
 faissmanager.build('data/root')
 result = faissmanager.search(query_type = 'text', query ='hello world')

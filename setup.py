@@ -7,7 +7,7 @@ setup(
     install_requires=[
         "torch",
         "torchvision",
-        "transformers",
+        "transformers==4.49",
         "Pillow",
         "faiss-gpu",  # or faiss-cpu depending on your target
         "tqdm",

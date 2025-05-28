@@ -286,8 +286,8 @@ class FAISSManager:
             video_name = os.path.basename(video)
             print(f"[INFO] Processing {video_name}")
             video_path = [f for f in os.listdir(video) if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
-            frames_path = [f for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
-            frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size)
+            frames_path = [os.path.join(video,f) for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]####
+            frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size) 
             for frame in frames_path:
                 frame_name = os.path.basename(frame)
                 frame_embed = self.encode_image(os.path.join(video, frame))

@@ -9,6 +9,7 @@ from transformers import AutoModel, AutoTokenizer
 import json
 import faiss
 from tqdm import tqdm
+from .transform import load_image
 
 
 
@@ -111,7 +112,7 @@ class FAISSManager:
         Returns:
             channel_name (str), main_news_text (str), thumbnail_text (str), time (str)
         """
-        self.ocr_model = self.ocr_model.to(self.device)
+        #self.ocr_model = self.ocr_model.to(self.device) ###
         
         # Load and preprocess image
         pixel_values = load_image(image, max_num=self.max_num).to(torch.bfloat16).cuda()

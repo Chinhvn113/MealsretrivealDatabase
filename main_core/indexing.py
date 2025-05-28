@@ -331,7 +331,8 @@ class FAISSManager:
             frames_path = [f for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
             text_path = [f for f in os.listdir(video) if f.lower().endswith(".txt",)]
             frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size)
-            speak_description = [f for f in os.listdir(video) if f.lower().endswith(".txt") and f.startwith("speak_")]            channel_name = None
+            speak_description = [f for f in os.listdir(video) if f.lower().endswith(".txt") and f.startwith("speak_")]            
+            channel_name = None
             for frame in frames_path:
                 frame_name = os.path.basename(frame)
                 frame_embed = self.encode_image(os.path.join(video, frame))

@@ -2,6 +2,7 @@ import numpy as np
 import random
 import torch
 from transformers import set_seed
+import random
 
 def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
     best_ratio_diff = float('inf')

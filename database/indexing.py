@@ -278,10 +278,14 @@ class FAISSManager:
                      if os.path.isdir(os.path.join(data_root, object))]
         print('video dirs:', video_dirs[:5])
         for video in tqdm(video_dirs, desc="Processing video"):
-            metadata = json.load(os.path.join(video, 'metadata.json'))
+            ###Suppose that the format is video1 folder contains the folder LV01 with the metadata json file
+            video_parent = os.path.dirname(video)
+            metadata = os.path.join(video_parent, 'metadata.json')
+            with open(metadata, "r") as m:
+                metadata = json.load(m)
             video_name = os.path.basename(video)
             print(f"[INFO] Processing {video_name}")
-            video_path = [f for f in os.listdir(video) if f.lower().endswith('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v')]
+            video_path = [f for f in os.listdir(video) if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
             frames_path = [f for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
             frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size)
             for frame in frames_path:

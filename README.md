@@ -9,6 +9,12 @@ After that install database library
 cd MealsretrievalDatabase
 pip install -e .
 ```
+Download the weights:
+```
+apt update git-lfs
+git lfs install
+git clone https://huggingface.co/xinyu1205/recognize-anything-plus-model
+```
 Simple use:
 ```python
 from database import FAISSManager, set_all_seeds, build_transform, dynamic_preprocess, load_image

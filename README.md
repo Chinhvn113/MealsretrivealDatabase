@@ -11,7 +11,7 @@ pip install -e .
 ```
 Download the weights:
 ```
-apt update git-lfs
+apt install git-lfs
 git lfs install
 git clone https://huggingface.co/xinyu1205/recognize-anything-plus-model
 ```

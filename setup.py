@@ -22,6 +22,7 @@ setup(
         "pandas",
         "pymilvus",
         "qdrant-client"
+        "fairscale"
     ],
     author="Chinhcachep",
     description="A metadata construction and FAISS indexing library.",

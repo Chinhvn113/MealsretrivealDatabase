@@ -15,6 +15,12 @@ apt-get install git-lfs
 git lfs install
 git clone https://huggingface.co/xinyu1205/recognize-anything-plus-model
 ```
+Download test keyframes
+```
+pip install gdown
+gdown --fuzzy https://drive.google.com/file/d/1LKZHyhjhLGnbQHXXBN7CjrFD2npN95mw/view
+unzip toidayyy.zip
+```
 Simple use:
 ```python
 from database import FAISSManager, set_all_seeds, build_transform, dynamic_preprocess, load_image

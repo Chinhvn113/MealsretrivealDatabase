@@ -308,7 +308,7 @@ class FAISSManager:
                     "frame_name": frame_name, 
                     "frame_path": os.path.join(video, frame), 
                     "video_shot": metadata[video_name][frame_name]["shot"], 
-                    "video_time": metadata[video_name][frame_name]["time_stamp"],
+                    "video_time": metadata[video_name][frame_name]["time-stamp"],
                     "objects": tags,
                     "channel_name": channel_name,
                     "real_life_time": time

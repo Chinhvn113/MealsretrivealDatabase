@@ -25,7 +25,7 @@ class FAISSManager:
         tag_model_weights='/root/Database/recognize-anything-plus-model/ram_plus_swin_large_14m.pth',
         image_size=384,
         max_num=12,
-        ocr_model_path="OpenGVLab/InternVL3-38B"
+        ocr_model_path="OpenGVLab/InternVL3-14B"
         ):
         """
         Initialize the FAISS Manager for both building and retrieving from FAISS indexes
@@ -54,9 +54,9 @@ class FAISSManager:
         self.ocr_model = AutoModel.from_pretrained(ocr_model_path,
                                       torch_dtype=torch.bfloat16,
                                     #   device_map="auto",
-                                      load_in_8bit=True,
+                                    #   load_in_8bit=True,
                                       trust_remote_code=True,
-                                      use_flash_attn=True).eval()
+                                      use_flash_attn=True).eval().to(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(ocr_model_path,
                                               trust_remote_code=True,
                                               use_fast=True)
@@ -143,7 +143,7 @@ class FAISSManager:
 
     **Time:** On-screen timestamp showing current broadcast time (e.g., 06:54:33).
 
-    **Return answer in this json format:**
+    **Return answer in this json format, return no additional word:**
     {
         "channel_name": "",
         "main_news_text": "",
@@ -162,10 +162,10 @@ class FAISSManager:
         # Try parsing the response to extract the fields
         try:
             result = json.loads(response)
-            channel_name = result.get("channel_name", "").strip()
-            main_news_text = result.get("main_news_text", "").strip()
-            thumbnail_text = result.get("thumbnail_text", "").strip()
-            time = result.get("time", "").strip()
+            channel_name = result.get("channel_name", "")#.strip()
+            main_news_text = result.get("main_news_text", "")#.strip()
+            thumbnail_text = result.get("thumbnail_text", "")#.strip()
+            time = result.get("time", "")#.strip()
         except Exception as e:
             print(f"Error parsing OCR response: {e}")
             channel_name = ""
@@ -284,38 +284,46 @@ class FAISSManager:
             metadata = os.path.join(video_parent, 'metadata.json')
             with open(metadata, "r") as m:
                 metadata = json.load(m)
-            video_name = os.path.basename(video)
+                print('metadata:',list(metadata.keys())[:5])    
+            video_name_ = os.path.basename(video)
+            video_name = video_name_.split('.')[0]
+
             print(f"[INFO] Processing {video_name}")
             video_path = [f for f in os.listdir(video) if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
             frames_path = [os.path.join(video,f) for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]####
             frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size) 
             for frame in frames_path:
-                frame_name = os.path.basename(frame)
-                frame_embed = self.encode_image(os.path.join(video, frame))
-                self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
+                frame_name_ = os.path.basename(frame)
+                frame_name = frame_name_.split('.')[0]
+                print('frame name:', frame_name)
                 tags = self.get_tag(os.path.join(video, frame))
                 channel_name, main_news_text, thumbnail_text, time = self.get_ocr(os.path.join(video, frame))
                 thumbnail_text = thumbnail_text if thumbnail_text else None
                 main_news_text = main_news_text if main_news_text else None
-                embed_thumbnail = self.encode_text(thumbnail_text)
-                embed_main_news = self.encode_text(main_news_text)
 
+                
                 frame_metadata = {
                     "video_name": video_name, 
                     "video_path":video_path,
                     "frame_name": frame_name, 
                     "frame_path": os.path.join(video, frame), 
-                    "video_shot": metadata[frame_name]["shot"], 
-                    "video_time": metadata[frame_name]["time_stamp"],
+                    "video_shot": metadata[video_name][frame_name]["shot"], 
+                    "video_time": metadata[video_name][frame_name]["time_stamp"],
                     "objects": tags,
                     "channel_name": channel_name,
                     "real_life_time": time
                     }
+                if thumbnail_text is not None:
+                    embed_thumbnail = self.encode_text(thumbnail_text)
+                    self.image_metadata.append(frame_metadata)
+                    self.text_index.add(np.expand_dims(embed_thumbnail.astype(np.float32), axis=0))
+                if main_news_text is not None:
+                    embed_main_news = self.encode_text(main_news_text)
+                    self.text_metadata.append(frame_metadata)
+                frame_embed = self.encode_image(os.path.join(video, frame))
+                self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
                 self.image_metadata.append(frame_metadata)
-                self.text_index.add(np.expand_dims(embed_thumbnail.astype(np.float32), axis=0))
-                self.text_metadata.append(frame_metadata)
-                self.text_index.add(np.expand_dims(embed_main_news.astype(np.float32), axis=0))
-                self.text_metadata.append(frame_metadata)
+
                 # self.image_object_root.append(video)
     def __build_keyframe_ACM(self, data_root, image_batch_size=8):
         """
@@ -360,8 +368,7 @@ class FAISSManager:
                     "channel_name": channel_name,
                     "real_life_time": time
                     }
-                self.image_metadata.append(frame_metadata)
-                self.text_index.add(np.expand_dims(embed_thumbnail.astype(np.float32), axis=0))
+
                 self.text_metadata.append(frame_metadata)
                 self.text_index.add(np.expand_dims(embed_main_news.astype(np.float32), axis=0))
                 self.text_metadata.append(frame_metadata)

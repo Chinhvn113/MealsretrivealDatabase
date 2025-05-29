@@ -3,6 +3,7 @@ import torchvision.transforms as T
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
+from .core import find_closest_aspect_ratio
 
 
 def build_transform(input_size):

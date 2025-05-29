@@ -6,7 +6,7 @@ pip install -e .
 ```
 After that install database library
 ```bash
-cd MealsretrievalDatabase
+cd MealsretrievevalDatabase
 pip install -e .
 ```
 Download the weights:

@@ -6,17 +6,18 @@ pip install -e .
 ```
 After that install database library
 ```bash
+cd ..
 cd MealsretrivevalDatabase
 pip install -e .
 ```
 Download the weights:
-```
+```bash
 apt-get install git-lfs
 git lfs install
 git clone https://huggingface.co/xinyu1205/recognize-anything-plus-model
 ```
 Download test keyframes
-```
+```bash
 pip install gdown
 gdown --fuzzy https://drive.google.com/file/d/1LKZHyhjhLGnbQHXXBN7CjrFD2npN95mw/view
 unzip toidayyy.zip

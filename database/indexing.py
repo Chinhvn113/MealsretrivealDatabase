@@ -45,22 +45,6 @@ class FAISSManager:
         self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True).half()
         self.model.to(self.device)
         self.model.eval()
-        self.tag_model = ram_plus(
-            pretrained=tag_model_weights,
-            image_size=self.image_size,
-            vit='swin_l',
-        )
-        self.tag_model.eval()
-        self.ocr_model = AutoModel.from_pretrained(ocr_model_path,
-                                      torch_dtype=torch.bfloat16,
-                                    #   device_map="auto",
-                                    #   load_in_8bit=True,
-                                      trust_remote_code=True,
-                                      use_flash_attn=True).eval().to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(ocr_model_path,
-                                              trust_remote_code=True,
-                                              use_fast=True)
-        
         # Initialize FAISS indexes
         # resource = faiss.StandardGpuResources()
         # image_index_cpu = faiss.IndexFlatIP(self.embedding_dim)
@@ -86,96 +70,6 @@ class FAISSManager:
         # Load existing indexes if provided
         if index_dir and os.path.exists(index_dir):
             self.load(index_dir)
-    def get_tag(self, image):
-        """
-        Get tags from the image using the tag model
-        
-        Args:
-            image: Path to the image file
-        """
-        transform = get_transform(image_size=self.image_size)
-        self.tag_model = self.tag_model.to(self.device)
-        target = transform(Image.open(image)).unsqueeze(0).to(self.device)
-        result = inference(target, self.tag_model)
-        print('tags:', result)
-        tags = result[0]
-        tags = [i for i in tags.split(' | ')]
-        return tags
-
-    def get_ocr(self, image):
-        """
-        Get OCR from the image using the OCR model
-        
-        Args:
-            image: Path to the image file
-
-        Returns:
-            channel_name (str), main_news_text (str), thumbnail_text (str), time (str)
-        """
-        #self.ocr_model = self.ocr_model.to(self.device) ###
-        
-        # Load and preprocess image
-        pixel_values = load_image(image, max_num=self.max_num).to(torch.bfloat16).cuda()
-
-        # Configure generation
-        generation_config = dict(max_new_tokens=1024, do_sample=True, temperature=0.01, top_p=0.9)
-
-        # Define the question prompt
-        question = '''
-    You are a structured OCR and information extraction model. Given a news broadcast image, extract key elements of the screen as structured data. Ignore any moving or scrolling text (tickers or subtitles). The banner may appear in any color and is typically used for concise summaries or headlines.
-
-    Extract the following fields (leave blank if not present):
-    **Channel Name:** The news channel name, typically visible as a logo or text in the top corners (e.g., HTV9, VTV, CNN, BBC, ANTV).
-
-    **Main News Text:**
-    - Paragraph-like or block text that conveys the main news content.
-    - Typically located in the center or main visual area of the screen (upper-middle or mid-screen).
-    - Includes large bold title text or speaker names and roles.
-    - Should not include branding, logos, or show names.
-    - If there is no informative news content, return main_news_text: null.
-
-    **Thumbnail Text:**
-    - A static overlay banner, regardless of its color.
-    - Positioned above the ticker, near the bottom, or on the side.
-    - Typically contains concise summaries, headlines, or topic teasers.
-    - Can appear in any color (red, blue, yellow, etc.).
-    - If the text is purely stylistic, logo-based, or branding-related (e.g., “60 giây” intro splash), return: "thumbnail_text": null.
-
-    **Time:** On-screen timestamp showing current broadcast time (e.g., 06:54:33).
-
-    **Return answer in this json format, return no additional word:**
-    {
-        "channel_name": "",
-        "main_news_text": "",
-        "thumbnail_text": "",
-        "time": ""
-    }
-
-    Now extract the information from this image: 
-    <image>
-    '''
-
-        # Generate response
-        response = self.ocr_model.chat(self.tokenizer, pixel_values, question, generation_config)
-        print(f'User: {question}\nAssistant: {response}')
-
-        # Try parsing the response to extract the fields
-        try:
-            result = json.loads(response)
-            channel_name = result.get("channel_name", "")#.strip()
-            main_news_text = result.get("main_news_text", "")#.strip()
-            thumbnail_text = result.get("thumbnail_text", "")#.strip()
-            time = result.get("time", "")#.strip()
-        except Exception as e:
-            print(f"Error parsing OCR response: {e}")
-            channel_name = ""
-            main_news_text = ""
-            thumbnail_text = ""
-            time = ""
-
-        return channel_name, main_news_text, thumbnail_text, time
-
-            
     def encode_image(self, image_path):
         """Encode a single image"""
         emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]#, truncate_dim=self.embedding_dim)[0]
@@ -269,109 +163,123 @@ class FAISSManager:
     
     def __build_keyframe_AIC(self, data_root, image_batch_size=8):
         """
-        Build FAISS indexes from dataset directory
-        
+        Build FAISS indexes from dataset directory for ACM format
+
         Args:
             data_root: Root directory containing object data
             image_batch_size: Batch size for image encoding
         """
-        video_dirs = [os.path.join(data_root, object) for object in os.listdir(data_root) 
-                     if os.path.isdir(os.path.join(data_root, object))]
+        video_dirs = [os.path.join(data_root, obj) for obj in os.listdir(data_root)
+                    if os.path.isdir(os.path.join(data_root, obj))]
         print('video dirs:', video_dirs[:5])
-        for video in tqdm(video_dirs, desc="Processing video"):
-            ###Suppose that the format is video1 folder contains the folder LV01 with the metadata json file
-            video_parent = os.path.dirname(video)
-            metadata = os.path.join(video_parent, 'metadata.json')
-            with open(metadata, "r") as m:
-                metadata = json.load(m)
-                print('metadata:',list(metadata.keys())[:5])    
-            video_name_ = os.path.basename(video)
-            video_name = video_name_.split('.')[0]
 
+        for video in tqdm(video_dirs, desc="Processing video"):
+            video_parent = os.path.dirname(video)
+            metadata_path = os.path.join(video_parent, 'metadata.json')
+            with open(metadata_path, "r") as m:
+                metadata = json.load(m)
+                print('metadata:', list(metadata.keys())[:5])
+
+            video_name = os.path.basename(video)
             print(f"[INFO] Processing {video_name}")
-            video_path = [f for f in os.listdir(video) if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
-            frames_path = [os.path.join(video,f) for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]####
-            frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size) 
+
+            video_path = [f for f in os.listdir(video)
+                        if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
+
+            frames_path = [os.path.join(video, f) for f in os.listdir(video)
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
             for frame in frames_path:
                 frame_name_ = os.path.basename(frame)
                 frame_name = frame_name_.split('.')[0]
-                print('frame name:', frame_name)
-                tags = self.get_tag(os.path.join(video, frame))
-                channel_name, main_news_text, thumbnail_text, time = self.get_ocr(os.path.join(video, frame))
-                thumbnail_text = thumbnail_text if thumbnail_text else None
-                main_news_text = main_news_text if main_news_text else None
+                frame_id = frame_name.split('_')[-1]
 
-                
+                print('frame name:', frame_name)
+
+                thumbnail_text = metadata[video_name][frame_name].get("ocr", None)
+                tags = metadata[video_name][frame_name].get("tags", [])
+                shot = metadata[video_name][frame_name].get("shot", None)
+                timestamp = metadata[video_name][frame_name].get("time-stamp", None)
+
                 frame_metadata = {
-                    "video_name": video_name, 
-                    "video_path":video_path,
-                    "frame_name": frame_name, 
-                    "frame_path": os.path.join(video, frame), 
-                    "video_shot": metadata[video_name][frame_name]["shot"], 
-                    "video_time": metadata[video_name][frame_name]["time-stamp"],
-                    "objects": tags,
-                    "channel_name": channel_name,
-                    "real_life_time": time
-                    }
-                if thumbnail_text is not None:
-                    embed_thumbnail = self.encode_text(thumbnail_text)
-                    self.image_metadata.append(frame_metadata)
-                    self.text_index.add(np.expand_dims(embed_thumbnail.astype(np.float32), axis=0))
-                if main_news_text is not None:
-                    embed_main_news = self.encode_text(main_news_text)
-                    self.text_metadata.append(frame_metadata)
+                    "frame_id": frame_id,
+                    "video_name": video_name,
+                    "video_path": video_path,
+                    "frame_name": frame_name,
+                    "frame_path": os.path.join(video, frame),
+                    "video_shot": shot,
+                    "video_time": timestamp,
+                    "objects": tags
+                }
+
+                # Text index
+                embed_text = self.encode_text(thumbnail_text) if thumbnail_text else self.encode_text("")
+                self.text_index.add(np.expand_dims(embed_text.astype(np.float32), axis=0))
+                self.text_metadata.append(frame_metadata)
+
+                # Image index
                 frame_embed = self.encode_image(os.path.join(video, frame))
                 self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
                 self.image_metadata.append(frame_metadata)
-
-                # self.image_object_root.append(video)
+                
     def __build_keyframe_ACM(self, data_root, image_batch_size=8):
         """
-        Build FAISS indexes from dataset directory
-        
+        Build FAISS indexes from dataset directory for ACM format
+
         Args:
             data_root: Root directory containing object data
             image_batch_size: Batch size for image encoding
         """
-        video_dirs = [os.path.join(data_root, object) for object in os.listdir(data_root) 
-                     if os.path.isdir(os.path.join(data_root, object))]
+        video_dirs = [os.path.join(data_root, obj) for obj in os.listdir(data_root)
+                    if os.path.isdir(os.path.join(data_root, obj))]
         print('video dirs:', video_dirs[:5])
+
         for video in tqdm(video_dirs, desc="Processing video"):
-            metadata = json.load(os.path.join(video, 'metadata.json'))
+            video_parent = os.path.dirname(video)
+            metadata_path = os.path.join(video_parent, 'metadata.json')
+            with open(metadata_path, "r") as m:
+                metadata = json.load(m)
+                print('metadata:', list(metadata.keys())[:5])
+
             video_name = os.path.basename(video)
             print(f"[INFO] Processing {video_name}")
-            video_path = [f for f in os.listdir(video) if f.lower().endswith('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v')]
-            frames_path = [f for f in os.listdir(video) if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
-            text_path = [f for f in os.listdir(video) if f.lower().endswith(".txt",)]
-            frame_embeds = self.encode_image_batch(frames_path, batch_size=image_batch_size)
-            speak_description = [f for f in os.listdir(video) if f.lower().endswith(".txt") and f.startwith("speak_")]            
-            channel_name = None
+
+            video_path = [f for f in os.listdir(video)
+                        if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v'))]
+
+            frames_path = [os.path.join(video, f) for f in os.listdir(video)
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', 'webp'))]
             for frame in frames_path:
-                frame_name = os.path.basename(frame)
-                frame_embed = self.encode_image(os.path.join(video, frame))
-                self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
-                tags = self.get_tag(os.path.join(video, frame))
-                channel_name, main_news_text, thumbnail_text, time = self.get_ocr(os.path.join(video, frame))
-                thumbnail_text = thumbnail_text if thumbnail_text else None
-                main_news_text = main_news_text if main_news_text else None
-                embed_thumbnail = self.encode_text(thumbnail_text)
-                embed_main_news = self.encode_text(main_news_text)
+                frame_name_ = os.path.basename(frame)
+                frame_name = frame_name_.split('.')[0]
+                frame_id = frame_name.split('_')[-1]
+
+                print('frame name:', frame_name)
+
+                thumbnail_text = metadata[video_name][frame_name].get("ocr", None)
+                tags = metadata[video_name][frame_name].get("tags", [])
+                shot = metadata[video_name][frame_name].get("shot", None)
+                timestamp = metadata[video_name][frame_name].get("time-stamp", None)
 
                 frame_metadata = {
-                    "video_name": video_name, 
-                    "video_path":video_path,
-                    "frame_name": frame_name, 
-                    "frame_path": os.path.join(video, frame), 
-                    "video_shot": metadata[frame_name]["shot"], 
-                    "video_time": metadata[frame_name]["time_stamp"],
-                    "objects": tags,
-                    "channel_name": channel_name,
-                    "real_life_time": time
-                    }
+                    "frame_id": frame_id,
+                    "video_name": video_name,
+                    "video_path": video_path,
+                    "frame_name": frame_name,
+                    "frame_path": os.path.join(video, frame),
+                    "video_shot": shot,
+                    "video_time": timestamp,
+                    "objects": tags
+                }
 
+                # Text index
+                embed_text = self.encode_text(thumbnail_text) if thumbnail_text else self.encode_text("")
+                self.text_index.add(np.expand_dims(embed_text.astype(np.float32), axis=0))
                 self.text_metadata.append(frame_metadata)
-                self.text_index.add(np.expand_dims(embed_main_news.astype(np.float32), axis=0))
-                self.text_metadata.append(frame_metadata)
+
+                # Image index
+                frame_embed = self.encode_image(os.path.join(video, frame))
+                self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
+                self.image_metadata.append(frame_metadata)
                 
     def build(self, data_root, image_batch_size=8, mode=None):
         if mode == 'AIC':

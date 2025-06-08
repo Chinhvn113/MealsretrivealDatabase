@@ -9,15 +9,7 @@ from PIL import Image
 from .transform import load_image
 from time import datetime
 import math
-class keyframe():
-    def __init__(self, video_id, timestamp, sim_score):
-        self.video_id = video_id
-        if type(timestamp) == str:
-            dt = datetime.strptime(timestamp, '%H:%M:%S')
-            timestamp = dt.hour * 3600 + dt.minute * 60 + dt.second
-        self.timestamp = timestamp
-        self.sim_score = sim_score
-        
+
 class MilvusManager:
     def __init__(self, 
                  embedding_dim=1024, 
@@ -27,7 +19,8 @@ class MilvusManager:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.embedding_dim = embedding_dim
-
+        self.metric_type = "COSINE"  # Fixed to use COSINE metric
+        self.index_type = "IVF_FLAT"
         # Connect to Milvus
         connections.connect("default", host=host, port=port)
 
@@ -37,7 +30,12 @@ class MilvusManager:
         # Initialize metadata stores
         self.image_metadata = []
         self.text_metadata = []
-
+        self.temporal_state = {
+            "query_history": [],
+            "query_results": {},
+            "videos_in_A": [],
+            "keyframe_A_reranked": []
+        }
         # Init Milvus schema & collection
         self._init_milvus_collections()
 
@@ -46,65 +44,91 @@ class MilvusManager:
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
             FieldSchema(name="image_embedding", dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
             FieldSchema(name="text_embedding", dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
-            FieldSchema(name="metadata", dtype=DataType.JSON)
+            FieldSchema(name="metadata", dtype=DataType.JSON),
         ]
 
         schema = CollectionSchema(fields, description="Unified multimodal index")
 
         if not utility.has_collection("multimodal_index"):
             self.collection = Collection(name="multimodal_index", schema=schema)
-            self.collection.create_index("image_embedding", {"metric_type": "IP", "index_type": "FLAT", "params": {}})
-            self.collection.create_index("text_embedding", {"metric_type": "IP", "index_type": "FLAT", "params": {}})
+            
+            # Create index with specified metric type
+            index_params = {
+                "metric_type": self.metric_type,
+                "index_type": self.index_type,
+                "params": {"nlist": 1024} if self.index_type == "IVF_FLAT" else {}
+            }
+            
+            self.collection.create_index("image_embedding", index_params)
+            self.collection.create_index("text_embedding", index_params)
         else:
             self.collection = Collection(name="multimodal_index")
 
     def encode_image(self, image_path):
+        """Encode image - no normalization needed with COSINE metric"""
         emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]
-        return emb / np.linalg.norm(emb)
+        return emb  # Let Milvus handle normalization automatically
 
     def encode_text(self, text):
+        """Encode text - no normalization needed with COSINE metric"""
         if isinstance(text, str):
             text = [text]
         emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)
-        emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
         return emb[0] if len(text) == 1 else emb
 
     def insert(self, image_embedding=None, text_embedding=None, metadata=None):
         def wrap(x):
             if x is None:
                 return [None]
-            if isinstance(x, np.ndarray) and x.ndim == 1:
-                return [x.tolist()]
+            if isinstance(x, np.ndarray):
+                if x.ndim == 1:
+                    return [x.tolist()]
+                elif x.ndim == 2 and x.shape[0] == 1:
+                    return [x[0].tolist()]
+                else:
+                    raise ValueError(f"Unexpected embedding shape: {x.shape}")
+            if isinstance(x, list):
+                return [x]
             return [x]
+        
+        try:
+            self.collection.insert([
+                wrap(image_embedding if image_embedding is not None else np.zeros(self.embedding_dim)),
+                wrap(text_embedding if text_embedding is not None else np.zeros(self.embedding_dim)),
+                wrap(metadata if metadata else {})
+            ])
+            self.collection.flush()  # Ensure data is persisted
+        except Exception as e:
+            print(f"Error inserting data: {e}")
+            raise
 
-        self.collection.insert([
-            wrap(image_embedding if image_embedding is not None else np.zeros(self.embedding_dim)),
-            wrap(text_embedding if text_embedding is not None else np.zeros(self.embedding_dim)),
-            wrap(metadata if metadata else {})
-        ])
+    def _ensure_collection_loaded(self):
+        """Ensure collection is loaded before operations."""
+        if not self.collection.has_index():
+            print("Warning: Collection has no index. Search performance may be slow.")
+        self.collection.load()
 
-    def search(self, query, mode="text", top_k=5, tags_filter=None, tags_filter_mode="any"):
+    def search(self, query, mode="text", top_k=5, tags_filter=None, tags_filter_mode="any", start_temporal_chain=False):
         """
         Searches the Milvus collection for relevant keyframes with optional tag filtering.
+        Optionally starts a temporal search chain with this query as Query A.
 
         Args:
             query (str): The search query (text or image path/data).
-            mode (str): The search mode, either "text" or "image".
-            top_k (int): The number of top results to return.
-            tags_filter (list, optional): A list of tags (strings) to filter the results by.
-                                          Only results containing these tags will be returned.
-            tags_filter_mode (str, optional): Determines how tags_filter is applied:
-                                              - "any": (default) Returns documents containing at least one of the tags. (OR logic)
-                                              - "all": Returns documents containing all specified tags. (AND logic)
+            mode (str): "text" or "image".
+            top_k (int): Number of top results.
+            tags_filter (list): List of tags to filter by.
+            tags_filter_mode (str): "any" or "all" for tag filtering logic.
+            start_temporal_chain (bool): If True, initializes temporal chain with this query.
 
         Returns:
-            list: A list of dictionaries, each containing:
-                  - 'metadata': The metadata of the keyframe.
-                  - 'score': The similarity score.
-                  - 'text_embedding' or 'image_embedding': The embedding vector of the keyframe.
+            list: A list of result dictionaries, each with:
+                - 'metadata'
+                - 'score'
+                - 'text_embedding' or 'image_embedding'
         """
-        self.collection.load()
-
+        self._ensure_collection_loaded()
+        
         if mode == "text":
             query_vector = self.encode_text(query)
             anns_field = "text_embedding"
@@ -118,41 +142,60 @@ class MilvusManager:
         if tags_filter:
             if not isinstance(tags_filter, list):
                 raise TypeError("tags_filter must be a list of strings.")
-            if not tags_filter:
-                pass # Empty tags_filter list, no filtering
-            elif tags_filter_mode == "any":
-                # OR logic: metadata['tags'] contains any of the tags in tags_filter
+            if tags_filter_mode == "any":
                 formatted_tags = ", ".join([f"'{tag}'" for tag in tags_filter])
                 expr = f"metadata['tags'] array_contains_any [{formatted_tags}]"
             elif tags_filter_mode == "all":
-                # AND logic: metadata['tags'] contains ALL of the tags in tags_filter
-                contains_clauses = [f"metadata['tags'] array_contains '{tag}'" for tag in tags_filter]
-                expr = " AND ".join(contains_clauses)
+                expr = " AND ".join([f"metadata['tags'] array_contains '{tag}'" for tag in tags_filter])
             else:
                 raise ValueError("tags_filter_mode must be 'any' or 'all'.")
-
         output_fields = ["metadata", anns_field]
 
         results = self.collection.search(
             data=[query_vector.tolist()],
             anns_field=anns_field,
-            param={"metric_type": "IP", "params": {}},
+            param={"metric_type": self.metric_type, "params": {}},
             limit=top_k,
             output_fields=output_fields,
             expr=expr
         )
 
         formatted_results = []
+        embeddings = []
         if results and results[0]:
             for hit in results[0]:
-                result_item = {
+                emb = hit.entity.get(anns_field)
+                formatted_results.append({
                     "metadata": hit.entity.get("metadata"),
                     "score": hit.distance,
-                    anns_field: hit.entity.get(anns_field)
-                }
-                formatted_results.append(result_item)
+                    anns_field: emb
+                })
+                embeddings.append(emb)
+
+        # Handle temporal chain start
+        if start_temporal_chain:
+            self._init_temporal_state(query, mode, formatted_results, embeddings)
 
         return formatted_results
+    def _init_temporal_state(self, query, mode, results, embeddings):
+        """Initialize temporal search state properly"""
+        self.temporal_state = {
+            "query_history": [{"query": query, "mode": mode}],
+            "query_results": {"A": results},
+            "videos_in_A": list(set([
+                item["metadata"]["video_name"] 
+                for item in results 
+                if "video_name" in item["metadata"]
+            ])),
+            "keyframe_A_reranked": [
+                {
+                    "metadata": item["metadata"],
+                    "original_score": item["score"],
+                    "temporal_score": item["score"]
+                }
+                for item in results
+            ]
+        }
 
     def build(self, data_root, image_batch_size=8, mode=None):
         if mode == 'AIC':
@@ -196,6 +239,7 @@ class MilvusManager:
                 self.insert(image_embedding=embed_image, text_embedding=embed_text, metadata=frame_meta)
 
     def __build_keyframe_ACM(self, data_root, image_batch_size=8):
+        "update later for Ctrl+F GOD mode :DD"
         self.__build_keyframe_AIC(data_root, image_batch_size=image_batch_size)
 
     def __build_roomelsa(self, data_root, image_batch_size=8):
@@ -260,116 +304,103 @@ class MilvusManager:
             return None
 
         weight_B = 1 - weight_A
-        if mode == "natural exponential":
+        if mode == "2":
             penalty = weight_lamda * (1 - math.exp(-weight_gamma * distance / threshold_alpha))
-        elif mode == "linear":
-            penalty = weight_lamda * (distance / threshold_alpha)
+        elif mode == "1":
+            penalty = weight_lamda * (distance / threshold_alpha, 1.0)
         else:
-            raise ValueError(f"Unsupported mode: {mode}")
+            raise ValueError(f"Unsupported mode: {mode} use 1 for linear or 2 for natural exponential")
 
         return weight_A * simA + weight_B * simB - penalty
     
-    def temporal_search_sequence(self, query, mode="text", top_k=5,
-                                    temporal_params=None):
-        if temporal_params is None:
-            temporal_params = {
-                'threshold_maximum': 300,
-                'threshold_alpha': 60.0,
-                'weight_A': 0.5,
-                'weight_lamda': 0.3,
-                'weight_gamma': 1.0,
-                'mode': 1
-            }
-        # Determine if this is the first query in the sequence (A)
-        query_is_A = not hasattr(self, 'temporal_state') or len(self.temporal_state["query_history"]) == 0
-
-        # Update temporal_params if provided
-        if hasattr(self, 'temporal_params'):
-            self.temporal_params.update(temporal_params)
-        else:
-            self.temporal_params = temporal_params.copy()
-
-        if query_is_A:
-            # New chain: reset
-            self.temporal_state = {
-                "query_history": [],
-                "query_results": {},
-                "keyframe_A_reranked": [],
-                "videos_in_A": set()
-            }
-
+    def temporal_search_sequence(self, query, mode="text", top_k=5):
+        """
+        Handles sequential temporal search reranking based on temporal consistency
+        across multiple queries (A, B, C, ...). Query A must be searched externally
+        using self.search() and passed in before calling this function.
+        """
+        # Proper validation
+        if not hasattr(self, 'temporal_state') or not self.temporal_state.get("query_history"):
+            raise ValueError("Temporal search chain not initialized. Call search() with start_temporal_chain=True first.")
+        
         state = self.temporal_state
         query_id = len(state["query_history"])
-        query_name = f"{chr(65 + query_id)}"  # "A", "B", "C", ...
+        
+        if query_id == 0:
+            raise ValueError("No Query A found. Initialize temporal chain first.")
+        query_name = f"{chr(65 + query_id)}"  # "B", "C", ...
 
-        # 1. Encode query
+        # Encode new query
         embedding = self.encode_text(query) if mode == "text" else self.encode_image(query)
 
-        # 2. Milvus expr filter if not A
-        expr = ""
-        if query_name != "A":
-            expr = f'video_name in ["' + '", "'.join(state["videos_in_A"]) + '"]'
+        # Restrict search to same videos as keyframe A
+        expr = f'metadata["video_name"] in ["' + '", "'.join(state["videos_in_A"]) + '"]'
 
-        # 3. Perform Milvus search ONCE
-        hits = self.milvus_client.search(
-            data=[embedding],
-            anns_field="embedding",
-            param=self.search_param,
+        # Perform filtered search
+        anns_field = "text_embedding" if mode == "text" else "image_embedding"
+        hits = self.collection.search(
+            data=[embedding.tolist()],
+            anns_field=anns_field,
+            param={"metric_type": "IP", "params": {}},
             limit=top_k,
-            expr=expr if expr else None,
-            output_fields=["video_name", "timestamp"]
+            output_fields=["metadata", anns_field],
+            expr=expr
         )[0]
 
-        # 4. Format search results
-        parsed_hits = [{
-            "embedding": h.entity["embedding"],
-            "metadata": h.entity["metadata"],
-            "sim_score": h.distance
-        } for h in hits]
+        # Format current query hits
+        parsed_hits = []
+        for h in hits:
+            parsed_hits.append({
+                "metadata": h.entity["metadata"],
+                "embedding": h.entity[anns_field],
+                "sim_score": h.distance
+            })
 
+        # Save query in state
         state["query_history"].append({"query": query, "mode": mode})
         state["query_results"][query_name] = parsed_hits
 
-        if query_name == "A":
-            # Save keyframe A with original scores and video list
-            for h in parsed_hits:
-                h["original_score"] = h["sim_score"]
-            state["keyframe_A_reranked"] = parsed_hits
-            state["videos_in_A"] = {h["metadata"]["video_name"] for h in parsed_hits}
-        else:
-            # Re-rank A with respect to new query (B, C, ...)
-            b_hits_by_video = {}
-            for b in parsed_hits:
-                vid = b["metadata"]["video_name"]
-                b_hits_by_video.setdefault(vid, []).append(b)
+        # Group B hits by video
+        b_hits_by_video = {}
+        for b in parsed_hits:
+            vid = b["metadata"]["video_name"]
+            b_hits_by_video.setdefault(vid, []).append(b)
 
-            reranked_A = []
-            for a in state["keyframe_A_reranked"]:
-                vid = a["metadata"]["video_name"]
-                if vid not in b_hits_by_video:
-                    continue
-                best_temporal_score = -float("inf")
-                for b in b_hits_by_video[vid]:
-                    score = self.compute_temporal_score(
-                        keyframeA={"timestamp": a["metadata"]["timestamp"], "sim_score": a["original_score"]},
-                        keyframeB={"timestamp": b["metadata"]["timestamp"], "sim_score": b["sim_score"]}
-                    )
-                    if score is not None and score > best_temporal_score:
-                        best_temporal_score = score
-                if best_temporal_score > -float("inf"):
-                    reranked_A.append({
-                        "metadata": a["metadata"],
-                        "temporal_score": best_temporal_score
-                    })
+        # Re-rank keyframe A
+        reranked_A = []
+        for a in state["keyframe_A_reranked"]:
+            vid = a["metadata"]["video_name"]
+            if vid not in b_hits_by_video:
+                continue
+            best_temporal_score = -float("inf")
+            for b in b_hits_by_video[vid]:
+                score = self.compute_temporal_score(
+                    keyframeA={"timestamp": a["metadata"]["timestamp"], "sim_score": a["original_score"]},
+                    keyframeB={"timestamp": b["metadata"]["timestamp"], "sim_score": b["sim_score"]}
+                )
+                if score is not None and score > best_temporal_score:
+                    best_temporal_score = score
+            if best_temporal_score > -float("inf"):
+                reranked_A.append({
+                    "metadata": a["metadata"],
+                    "temporal_score": best_temporal_score
+                })
 
-            reranked_A.sort(key=lambda x: x["temporal_score"], reverse=True)
-            state["keyframe_A_reranked"] = reranked_A
+        reranked_A.sort(key=lambda x: x["temporal_score"], reverse=True)
+        state["keyframe_A_reranked"] = reranked_A
 
-        # === Final return
         return {
             "query": f"query_{query_name}",
-            "keyframe_A_reranked": state["keyframe_A_reranked"],
-            f"keyframes_{query_name}": parsed_hits if query_name != "A" else None
+            "keyframe_A_reranked": reranked_A,
+            f"keyframes_{query_name}": parsed_hits
         }
-
         
+    def __del__(self):
+        """Cleanup connections when object is destroyed."""
+        try:
+            if hasattr(self, 'collection'):
+                self.collection.release()
+            connections.disconnect("default")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+

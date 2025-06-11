@@ -6,8 +6,9 @@ import os
 import json
 from tqdm import tqdm
 from PIL import Image
-from .transform import load_image
-from time import datetime
+from transform import load_image
+import time
+import datetime
 import math
 
 class MilvusManager:
@@ -19,10 +20,10 @@ class MilvusManager:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.embedding_dim = embedding_dim
-        self.metric_type = "COSINE"  # Fixed to use COSINE metric
-        self.index_type = "IVF_FLAT"
+        self.metric_type = "IP"  # Fixed to use COSINE metric
+        self.index_type = "HNSW"
         # Connect to Milvus
-        connections.connect("default", host=host, port=port)
+        connections.connect(alias="default", host=host, port=port)
 
         # Load model
         self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True).half().to(self.device).eval()
@@ -52,28 +53,51 @@ class MilvusManager:
         if not utility.has_collection("multimodal_index"):
             self.collection = Collection(name="multimodal_index", schema=schema)
             
-            # Create index with specified metric type
+            # Create indexes with explicit names and specified metric type
             index_params = {
                 "metric_type": self.metric_type,
                 "index_type": self.index_type,
                 "params": {"nlist": 1024} if self.index_type == "IVF_FLAT" else {}
             }
             
-            self.collection.create_index("image_embedding", index_params)
-            self.collection.create_index("text_embedding", index_params)
+            # Create indexes with explicit names to avoid ambiguity
+            self.collection.create_index(
+                field_name="image_embedding", 
+                index_params=index_params,
+                index_name="image_index"
+            )
+            self.collection.create_index(
+                field_name="text_embedding", 
+                index_params=index_params,
+                index_name="text_index"
+            )
+            
+            print("Created new collection with indexes")
         else:
             self.collection = Collection(name="multimodal_index")
+            print("Connected to existing collection")
 
     def encode_image(self, image_path):
-        """Encode image - no normalization needed with COSINE metric"""
-        emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]
-        return emb  # Let Milvus handle normalization automatically
-
+        """Encode a single image"""
+        emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]#, truncate_dim=self.embedding_dim)[0]
+        return emb / np.linalg.norm(emb)
+    
+    def encode_image_batch(self, image_paths, batch_size=8):
+        """Encode a batch of images"""
+        all_embeddings = []
+        for i in range(0, len(image_paths), batch_size):
+            batch = image_paths[i:i+batch_size]
+            emb = self.model.encode_image(batch, truncate_dim=self.embedding_dim)#, truncate_dim=self.embedding_dim)
+            emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
+            all_embeddings.append(emb)
+        return np.vstack(all_embeddings)
+    
     def encode_text(self, text):
-        """Encode text - no normalization needed with COSINE metric"""
+        """Encode text"""
         if isinstance(text, str):
             text = [text]
-        emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)
+        emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)#, truncate_dim=self.embedding_dim)
+        emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
         return emb[0] if len(text) == 1 else emb
 
     def insert(self, image_embedding=None, text_embedding=None, metadata=None):
@@ -101,12 +125,64 @@ class MilvusManager:
         except Exception as e:
             print(f"Error inserting data: {e}")
             raise
-
+    def reset_collection(self):
+        """Drop and recreate collection - WARNING: This deletes all data"""
+        if utility.has_collection("multimodal_index"):
+            utility.drop_collection("multimodal_index")
+            print("Dropped existing collection")
+        
+        self._init_milvus_collections()
+        print("Recreated collection with proper indexes")
     def _ensure_collection_loaded(self):
-        """Ensure collection is loaded before operations."""
-        if not self.collection.has_index():
-            print("Warning: Collection has no index. Search performance may be slow.")
-        self.collection.load()
+        """Ensure collection is properly loaded with explicit index checking"""
+        try:
+            # Check if both indexes exist
+            image_index_exists = False
+            text_index_exists = False
+            
+            try:
+                self.collection.describe_index("image_index")
+                image_index_exists = True
+            except Exception:
+                pass
+                
+            try:
+                self.collection.describe_index("text_index")
+                text_index_exists = True
+            except Exception:
+                pass
+            
+            # Create missing indexes
+            if not image_index_exists or not text_index_exists:
+                index_params = {
+                    "metric_type": self.metric_type,
+                    "index_type": self.index_type,
+                    "params": {"nlist": 1024} if self.index_type == "IVF_FLAT" else {}
+                }
+                
+                if not image_index_exists:
+                    self.collection.create_index(
+                        field_name="image_embedding", 
+                        index_params=index_params,
+                        index_name="image_index"
+                    )
+                    print("Created image_index")
+                
+                if not text_index_exists:
+                    self.collection.create_index(
+                        field_name="text_embedding", 
+                        index_params=index_params,
+                        index_name="text_index"
+                    )
+                    print("Created text_index")
+            
+            # Load collection if not already loaded
+            self.collection.load()
+            print("Collection loaded successfully")
+                
+        except Exception as e:
+            print(f"Error ensuring collection loaded: {e}")
+            raise
 
     def search(self, query, mode="text", top_k=5, tags_filter=None, tags_filter_mode="any", start_temporal_chain=False):
         """
@@ -209,26 +285,28 @@ class MilvusManager:
 
     def __build_keyframe_AIC(self, data_root, image_batch_size=8):
         video_dirs = [os.path.join(data_root, d) for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d))]
+        print("videos:", video_dirs)
+        metadata_path = os.path.join(data_root, "metadata.json")
         for video_dir in tqdm(video_dirs, desc="Building Milvus AIC"):
-            metadata_path = os.path.join(video_dir, "metadata.json")
             if not os.path.exists(metadata_path):
                 continue
 
             with open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
-
-            frame_paths = [os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.lower().endswith('.jpg')]
-            for frame_path in frame_paths:
-                frame_name = os.path.basename(frame_path)
-                if frame_name not in metadata:
+            video_name = os.path.basename(video_dir)
+            metadata_4vid = metadata[video_name]
+            frame_paths = [os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.lower().endswith(('.jpg', '.webp'))]
+            # print('frame:', frame_paths)
+            for frame_path in tqdm(frame_paths, desc=f'buiding in {video_name}'):
+                frame_name = os.path.basename(frame_path).split('.')[0]
+                if frame_name not in metadata_4vid:
                     continue
-
-                meta = metadata[frame_name]
+                meta = metadata_4vid[frame_name]
                 embed_image = self.encode_image(frame_path)
                 embed_text = self.encode_text(meta.get("ocr", ""))
 
                 frame_meta = {
-                    "video_name": os.path.basename(video_dir),
+                    "video_name": video_name,
                     "frame_name": frame_name,
                     "frame_path": frame_path,
                     "shot": meta.get("shot"),
@@ -403,4 +481,27 @@ class MilvusManager:
             connections.disconnect("default")
         except Exception as e:
             print(f"Error during cleanup: {e}")
+            
+if __name__ == '__main__':
+    manager = MilvusManager(port = 19530, host = 'milvus-standalone')
+    manager.reset_collection()
+    manager.build(mode = 'AIC', data_root= '/root/demo_data/data')
+    results = manager.search(mode='text', query='A Man on a road')
+    for result in results:
+        print(f"Frame: {result['metadata']['frame_name']}, score: {result['score']} \n")
 
+        # Test similarity calculation
+    # text1 = "A man walking on the road"
+    # text2 = "Person walking on street"
+    # text3 = "Cat sitting on chair"
+
+    # emb1 = manager.encode_text(text1)
+    # emb2 = manager.encode_text(text2)
+    # emb3 = manager.encode_text(text3)
+
+    # # Calculate cosine similarity manually
+    # def cosine_similarity(a, b):
+    #     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+    # print(f"Similarity text1-text2: {cosine_similarity(emb1, emb2)}")
+    # print(f"Similarity text1-text3: {cosine_similarity(emb1, emb3)}")

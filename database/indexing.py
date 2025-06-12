@@ -326,7 +326,7 @@ class FAISSManager:
                         self.tag_index.add(np.expand_dims(tag_embedding.astype(np.float32), axis=0))
                         self.tag_metadata.append(tag_metadata)
     
-    def save_tag(self, save_dir):
+    def save_tag(self, save_dir='tag_index'):
         """
         Save indexes and metadata
         
@@ -375,7 +375,21 @@ class FAISSManager:
             # self.text_object_dirs.extend(object_dirs)
         else:
             raise ValueError("target must be 'image', 'text', or 'mean pooling images'")
-    
+    def search_tag(self, query, top_k=5, return_answer_vector=False):
+        query_vector = self.encode_text(query)
+        query_vector = query_vector[np.newaxis, :]
+        index = self.tag_index
+        object_dirs = self.tag_metadata
+        limit = top_k
+        distances, indices= index.search(query_vector, limit)
+        hits = []
+        
+        for idx, dist in zip(indices[0], distances[0]):
+            if idx == -1:
+                continue
+            hits.append(object_dirs[idx]['tag_text'])
+        return hits
+        
     def search(self, query, query_type="text", top_k=5, search_in="image", return_answer_vector=False):
         """
         Search for similar objects
@@ -409,13 +423,18 @@ class FAISSManager:
             object_dirs = self.text_metadata
             # object_root = self.text_object_root
             limit = top_k * 7
-        elif search_in == "mean pooling images":
+        elif search_in == "mean pooling image":
             index = self.mean_pooling_image_index
             object_dirs = self.mean_pooling_image_metadata
             # object_root = self.mean_pooling_image_root
             limit = top_k
+        elif search_in == "tag":
+            index = self.tag_index
+            object_dirs = self.tag_metadata
+            # object_root = self.mean_pooling_image_root
+            limit = top_k
         else:
-            raise ValueError("search_in must be 'image', 'text', or 'mean pooling images'")
+            raise ValueError("search_in must be 'image', 'text', or 'mean pooling image'")
         
         distances, indices= index.search(query_vector, limit)
         
@@ -440,8 +459,8 @@ class FAISSManager:
         else:
             hit_set = set()
             for hit in hits:
-                if hit["object_dir"] not in hit_set:
-                    hit_set.add(hit["object_dir"])
+                if hit["metadata"] not in hit_set:
+                    hit_set.add(hit["metadata"])
                     output.append(hit)
                     if len(output) == top_k:
                         break
@@ -549,7 +568,7 @@ class FAISSManager:
             self.image_object_dirs = np.load(os.path.join(save_dir, "image_object_dirs.npy"), allow_pickle=True).tolist()
             self.text_metadata = np.load(os.path.join(save_dir, "metadata.npy"), allow_pickle=True).tolist()
     
-    def load_tag(self, save_dir):
+    def load_tag(self, save_dir='tag_index'):
         tag_index = faiss.read_index(os.path.join(save_dir, "tag_index.faiss"))
         self.tag_index = faiss.index_cpu_to_gpu(self.res, 0, tag_index)
         self.tag_metadata = np.load(os.path.join(save_dir, "tag_metadata.npy"), allow_pickle=True).tolist()

@@ -58,15 +58,18 @@ class FAISSManager:
             self.image_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
             self.text_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
             self.mean_pooling_image_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
+            self.tag_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
         except:
             self.image_index = faiss.IndexFlatIP(self.embedding_dim)
             self.text_index = faiss.IndexFlatIP(self.embedding_dim)
             self.mean_pooling_image_index = faiss.IndexFlatIP(self.embedding_dim)
+            self.tag_index = faiss.IndexFlatIP(self.res, self.embedding_dim)
         
         # Metadata mapping
         self.image_metadata = []
         self.text_metadata = []
         self.mean_pooling_image_metadata = []
+        self.tag_metadata = []
         # Load existing indexes if provided
         if index_dir and os.path.exists(index_dir):
             self.load(index_dir)
@@ -280,7 +283,67 @@ class FAISSManager:
                 frame_embed = self.encode_image(os.path.join(video, frame))
                 self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
                 self.image_metadata.append(frame_metadata)
+    def build_tag(self, tag_txt_file, batch_size=32):
+            """
+            Build tag embeddings from a text file and insert them into separate tag collection.
+            This will NOT affect your existing image/text database at all.
+            
+            Args:
+                tag_txt_file (str): Path to the text file containing tags (one tag per line)
+                batch_size (int): Number of tags to process in each batch for efficiency
+            """
+            if not os.path.exists(tag_txt_file):
+                raise FileNotFoundError(f"Tag file not found: {tag_txt_file}")
+            
+            print(f"Building tag database from: {tag_txt_file}")
+            
+            # Read all tags from file
+            with open(tag_txt_file, 'r', encoding='utf-8') as f:
+                tags = [line.strip() for line in f.readlines() if line.strip()]
+            
+            if not tags:
+                print("No tags found in the file")
+                return
+            
+            print(f"Found {len(tags)} tags to process")
+            
+            # Process tags in batches for efficiency
+            for i in tqdm(range(0, len(tags), batch_size), desc="Processing tag batches"):
+                batch_tags = tags[i:i+batch_size]
                 
+                # Process each tag in the batch
+                for j, tag in enumerate(batch_tags):
+                    try:
+                        # Encode tag
+                        tag_embedding = self.encode_text(tag)
+                        
+                        # Create metadata
+                        tag_metadata = {
+                            "tag_text": tag,
+                            "tag_id": i + j,
+                            "created_at": datetime.datetime.now().isoformat()
+                        }
+                        self.tag_index.add(np.expand_dims(tag_embedding.astype(np.float32), axis=0))
+                        self.tag_metadata.append(tag_metadata)
+    
+    def save_tag(self, save_dir):
+        """
+        Save indexes and metadata
+        
+        Args:
+            save_dir: Directory to save indexes and metadata
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        self.tag_index = faiss.index_gpu_to_cpu(self.tag_index)
+        faiss.write_index(self.tag_index, os.path.join(save_dir, "tag_index.faiss"))
+        # faiss.write_index(self.mean_pooling_image_index, os.path.join(save_dir, "mean_image_index.faiss"))
+        
+        np.save(os.path.join(save_dir, "image_metadata.npy"), np.array(self.image_metadata))
+        np.save(os.path.join(save_dir, "tag_metadata.npy"), np.array(self.text_metadata))
+
+        print("[INFO] Index and metadata saved.")
+    
+                    
     def build(self, data_root, image_batch_size=8, mode=None):
         if mode == 'AIC':
             self.__build_keyframe_AIC(data_root, image_batch_size=image_batch_size)
@@ -485,3 +548,8 @@ class FAISSManager:
 
             self.image_object_dirs = np.load(os.path.join(save_dir, "image_object_dirs.npy"), allow_pickle=True).tolist()
             self.text_metadata = np.load(os.path.join(save_dir, "metadata.npy"), allow_pickle=True).tolist()
+    
+    def load_tag(self, save_dir):
+        tag_index = faiss.read_index(os.path.join(save_dir, "tag_index.faiss"))
+        self.tag_index = faiss.index_cpu_to_gpu(self.res, 0, tag_index)
+        self.tag_metadata = np.load(os.path.join(save_dir, "tag_metadata.npy"), allow_pickle=True).tolist()

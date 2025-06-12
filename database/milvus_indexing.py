@@ -10,6 +10,7 @@ from transform import load_image
 import time
 import datetime
 import math
+from indexing import FAISSManager
 
 class MilvusManager:
     def __init__(self, 
@@ -71,8 +72,6 @@ class MilvusManager:
                 index_params=index_params,
                 index_name="text_index"
             )
-            
-            print("Created new collection with indexes")
         else:
             self.collection = Collection(name="multimodal_index")
             print("Connected to existing collection")
@@ -99,6 +98,7 @@ class MilvusManager:
         emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)#, truncate_dim=self.embedding_dim)
         emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
         return emb[0] if len(text) == 1 else emb
+    
 
     def insert(self, image_embedding=None, text_embedding=None, metadata=None):
         def wrap(x):
@@ -183,8 +183,10 @@ class MilvusManager:
         except Exception as e:
             print(f"Error ensuring collection loaded: {e}")
             raise
+        
 
-    def search(self, query, mode="text", top_k=5, tags_filter=None, tags_filter_mode="any", start_temporal_chain=False):
+        
+    def search(self, query, mode="text", search_in='image', top_k=5, tags_filter=None, tags_filter_mode="any", start_temporal_chain=False):
         """
         Searches the Milvus collection for relevant keyframes with optional tag filtering.
         Optionally starts a temporal search chain with this query as Query A.
@@ -207,12 +209,14 @@ class MilvusManager:
         
         if mode == "text":
             query_vector = self.encode_text(query)
-            anns_field = "text_embedding"
         elif mode == "image":
             query_vector = self.encode_image(query)
-            anns_field = "image_embedding"
         else:
             raise ValueError("Mode must be 'text' or 'image'")
+        if search_in == 'text':
+            anns_field = 'text_embedding'
+        elif search_in == 'image':
+            anns_field = 'image_embedding'
 
         expr = None
         if tags_filter:
@@ -282,7 +286,8 @@ class MilvusManager:
             self.__build_roomelsa(data_root, image_batch_size=image_batch_size)
         else:
             raise ValueError("Invalid mode. Choose 'AIC', 'ACM', or 'roomelsa'.")
-
+        
+            
     def __build_keyframe_AIC(self, data_root, image_batch_size=8):
         video_dirs = [os.path.join(data_root, d) for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d))]
         print("videos:", video_dirs)
@@ -365,15 +370,18 @@ class MilvusManager:
                                 weight_A=0.5,
                                 weight_lamda=0.3,
                                 weight_gamma=1.0,
-                                mode: int=1):# 1 for linear, 2 for natural exponential
+                                mode: int=2):# 1 for linear, 2 for natural exponential
         def to_seconds(ts):
             if isinstance(ts, int):
                 return ts
-            dt = datetime.strptime(ts, "%H:%M:%S")
-            return dt.hour * 3600 + dt.minute * 60 + dt.second
+            minute = float(ts.split(':')[0])
+            second = float(ts.split(':')[1])
+            return minute * 60 + second
 
         tsA = to_seconds(keyframeA["timestamp"])
         tsB = to_seconds(keyframeB["timestamp"])
+        # tsA = keyframeA["timestamp"]
+        # tsB = keyframeB["timestamp"]
         simA = keyframeA["sim_score"]
         simB = keyframeB["sim_score"]
         distance = abs(tsA - tsB)
@@ -382,20 +390,33 @@ class MilvusManager:
             return None
 
         weight_B = 1 - weight_A
-        if mode == "2":
+        if mode == 2:
             penalty = weight_lamda * (1 - math.exp(-weight_gamma * distance / threshold_alpha))
-        elif mode == "1":
-            penalty = weight_lamda * (distance / threshold_alpha, 1.0)
+        elif mode == 1:
+            penalty = weight_lamda * min(distance / threshold_alpha, 1.0)
         else:
             raise ValueError(f"Unsupported mode: {mode} use 1 for linear or 2 for natural exponential")
 
         return weight_A * simA + weight_B * simB - penalty
     
-    def temporal_search_sequence(self, query, mode="text", top_k=5):
+    def temporal_search_sequence(self, query, mode="text", search_in='image', top_k=5):
         """
         Handles sequential temporal search reranking based on temporal consistency
         across multiple queries (A, B, C, ...). Query A must be searched externally
         using self.search() and passed in before calling this function.
+        top_k query B,C format:
+        {
+            "metadata": h.entity["metadata"],
+            "embedding": h.entity[anns_field],
+            "sim_score": h.distance
+        }
+        reranked query A output format:
+        
+        {
+            "metadata": a["metadata"],
+            "temporal_score": best_temporal_score
+        }
+        
         """
         # Proper validation
         if not hasattr(self, 'temporal_state') or not self.temporal_state.get("query_history"):
@@ -415,7 +436,7 @@ class MilvusManager:
         expr = f'metadata["video_name"] in ["' + '", "'.join(state["videos_in_A"]) + '"]'
 
         # Perform filtered search
-        anns_field = "text_embedding" if mode == "text" else "image_embedding"
+        anns_field = "text_embedding" if search_in == "text" else "image_embedding"
         hits = self.collection.search(
             data=[embedding.tolist()],
             anns_field=anns_field,
@@ -478,30 +499,50 @@ class MilvusManager:
         try:
             if hasattr(self, 'collection'):
                 self.collection.release()
+            if hasattr(self, 'tag_collection'):
+                self.tag_collection.release()
             connections.disconnect("default")
         except Exception as e:
             print(f"Error during cleanup: {e}")
             
 if __name__ == '__main__':
     manager = MilvusManager(port = 19530, host = 'milvus-standalone')
-    manager.reset_collection()
-    manager.build(mode = 'AIC', data_root= '/root/demo_data/data')
-    results = manager.search(mode='text', query='A Man on a road')
+    tag_manager = FAISSManager(index_dir='tag_index')
+    # Build tag database de ho tro tag filtering + multiprocessing
+    # tag_manager.build_tag(tag_txt_file='tag.txt')
+    # tag_manager.save_tag(save_dir='tag_index')
+    # manager.reset_collection()
+    # Hàm reset này không nổ gì đừng sài, nó xóa sạch dữ liệu đó :))))
+    # manager.build(mode = 'AIC', data_root= '/root/demo_data/data')
+    # Database build xong rồi, không nổ gì thì đừng chạy hàm build nha, nó build lại từ đầu bomboclat đó
+    query_A = 'A Man on a road'
+    tags_A = tag_manager.search_tag(search_in='tag', query_type='text', top_k=5)
+    results = manager.search(mode='text', query=query_A, search_in = 'image', start_temporal_chain = True)
+    print('Original top k query A:')
     for result in results:
-        print(f"Frame: {result['metadata']['frame_name']}, score: {result['score']} \n")
+        print(f"frame: {result['metadata']['frame_name']}, score: {result['score']}")
+    query_B = 'A man eating a women'
+    tags_B = tag_manager.search_tag(search_in='tag', query_type='text', top_k=5)
+    temporal_answer = manager.temporal_search_sequence(query_B, mode ='text')
+    print('Top K query B:')
+    for result in temporal_answer["keyframes_B"]:
+        print(f"frame: {result['metadata']['frame_name']}, score: {result['sim_score']}")
+    print('Top K query A reranked:')
+    for result in temporal_answer["keyframe_A_reranked"]:
+        print(f"frame: {result['metadata']['frame_name']}, temporal score: {result['temporal_score']}")
 
         # Test similarity calculation
     # text1 = "A man walking on the road"
     # text2 = "Person walking on street"
     # text3 = "Cat sitting on chair"
 
-    # emb1 = manager.encode_text(text1)
-    # emb2 = manager.encode_text(text2)
-    # emb3 = manager.encode_text(text3)
+    # emb1 = manager.encode_image('/root/demo_data/data/L01_V001/frame_545.webp')
+    # emb2 = manager.encode_image('/root/demo_data/data/L01_V001/frame_542.webp')
+    # emb3 = manager.encode_image('/root/demo_data/data/L01_V001/frame_543.webp')
 
-    # # Calculate cosine similarity manually
+    # # # Calculate cosine similarity manually
     # def cosine_similarity(a, b):
-    #     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    #     return np.dot(a, b) 
 
     # print(f"Similarity text1-text2: {cosine_similarity(emb1, emb2)}")
     # print(f"Similarity text1-text3: {cosine_similarity(emb1, emb3)}")

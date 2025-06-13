@@ -1,0 +1,17 @@
+etcd:
+  endpoints:
+    - etcd:2379
+
+minio:
+  address: minio
+  port: 9000
+  accessKeyID: minioadmin
+  secretAccessKey: minioadmin
+  bucketName: a-bucket
+
+common:
+  storageConfig:
+    rootPath: files
+
+proxy:
+  port: 19529

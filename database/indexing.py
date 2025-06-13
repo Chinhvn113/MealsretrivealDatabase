@@ -1,6 +1,4 @@
-from ram.models import ram_plus
-from ram import inference_ram as inference
-from ram import get_transform
+
 import os
 import numpy as np
 import torch
@@ -9,7 +7,7 @@ from transformers import AutoModel, AutoTokenizer
 import json
 import faiss
 from tqdm import tqdm
-from .transform import load_image
+from transform import load_image
 
 
 
@@ -21,11 +19,10 @@ class FAISSManager:
         embedding_dim=1024, 
         device=None, 
         index_dir=None, 
+        tag_dir=None,
         model_path="jinaai/jina-clip-v2", 
-        tag_model_weights='/root/Database/recognize-anything-plus-model/ram_plus_swin_large_14m.pth',
         image_size=384,
         max_num=12,
-        ocr_model_path="OpenGVLab/InternVL3-14B"
         ):
         """
         Initialize the FAISS Manager for both building and retrieving from FAISS indexes
@@ -73,6 +70,8 @@ class FAISSManager:
         # Load existing indexes if provided
         if index_dir and os.path.exists(index_dir):
             self.load(index_dir)
+        if tag_dir and os.path.exists(tag_dir):
+            self.load_tag(tag_dir)
     def encode_image(self, image_path):
         """Encode a single image"""
         emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]#, truncate_dim=self.embedding_dim)[0]
@@ -283,67 +282,50 @@ class FAISSManager:
                 frame_embed = self.encode_image(os.path.join(video, frame))
                 self.image_index.add(np.expand_dims(frame_embed.astype(np.float32), axis=0))
                 self.image_metadata.append(frame_metadata)
-    def build_tag(self, tag_txt_file, batch_size=32):
-            """
-            Build tag embeddings from a text file and insert them into separate tag collection.
-            This will NOT affect your existing image/text database at all.
-            
-            Args:
-                tag_txt_file (str): Path to the text file containing tags (one tag per line)
-                batch_size (int): Number of tags to process in each batch for efficiency
-            """
-            if not os.path.exists(tag_txt_file):
-                raise FileNotFoundError(f"Tag file not found: {tag_txt_file}")
-            
-            print(f"Building tag database from: {tag_txt_file}")
-            
-            # Read all tags from file
-            with open(tag_txt_file, 'r', encoding='utf-8') as f:
-                tags = [line.strip() for line in f.readlines() if line.strip()]
-            
-            if not tags:
-                print("No tags found in the file")
-                return
-            
-            print(f"Found {len(tags)} tags to process")
-            
-            # Process tags in batches for efficiency
-            for i in tqdm(range(0, len(tags), batch_size), desc="Processing tag batches"):
-                batch_tags = tags[i:i+batch_size]
                 
-                # Process each tag in the batch
-                for j, tag in enumerate(batch_tags):
-                    try:
-                        # Encode tag
-                        tag_embedding = self.encode_text(tag)
-                        
-                        # Create metadata
-                        tag_metadata = {
-                            "tag_text": tag,
-                            "tag_id": i + j,
-                            "created_at": datetime.datetime.now().isoformat()
-                        }
-                        self.tag_index.add(np.expand_dims(tag_embedding.astype(np.float32), axis=0))
-                        self.tag_metadata.append(tag_metadata)
-    
-    def save_tag(self, save_dir='tag_index'):
+    def build_tag(self, tag_txt_file, batch_size=32):
         """
-        Save indexes and metadata
+        Build tag embeddings from a text file and insert them into separate tag collection.
+        This will NOT affect your existing image/text database at all.
         
         Args:
-            save_dir: Directory to save indexes and metadata
+            tag_txt_file (str): Path to the text file containing tags (one tag per line)
+            batch_size (int): Number of tags to process in each batch for efficiency
         """
-        os.makedirs(save_dir, exist_ok=True)
-        self.tag_index = faiss.index_gpu_to_cpu(self.tag_index)
-        faiss.write_index(self.tag_index, os.path.join(save_dir, "tag_index.faiss"))
-        # faiss.write_index(self.mean_pooling_image_index, os.path.join(save_dir, "mean_image_index.faiss"))
+        if not os.path.exists(tag_txt_file):
+            raise FileNotFoundError(f"Tag file not found: {tag_txt_file}")
         
-        np.save(os.path.join(save_dir, "image_metadata.npy"), np.array(self.image_metadata))
-        np.save(os.path.join(save_dir, "tag_metadata.npy"), np.array(self.text_metadata))
-
-        print("[INFO] Index and metadata saved.")
-    
+        print(f"Building tag database from: {tag_txt_file}")
+        
+        # Read all tags from file
+        with open(tag_txt_file, 'r', encoding='utf-8') as f:
+            tags = [line.strip() for line in f.readlines() if line.strip()]
+        
+        if not tags:
+            print("No tags found in the file")
+            return
+        
+        print(f"Found {len(tags)} tags to process")
+        
+        # Process tags in batches for efficiency
+        for i in tqdm(range(0, len(tags), batch_size), desc="Processing tag batches"):
+            batch_tags = tags[i:i+batch_size]
+            
+            # Process each tag in the batch
+            for j, tag in enumerate(batch_tags):
+                try:
+                    # Encode tag
+                    tag_embedding = self.encode_text(tag)
                     
+                    # Create metadata
+                    tag_metadata = {
+                        "tag_text": tag,
+                        "tag_id": i + j,
+                    }
+                    self.tag_index.add(np.expand_dims(tag_embedding.astype(np.float32), axis=0))
+                    self.tag_metadata.append(tag_metadata)
+                except:
+                    raise ValueError('[ERROR] Failed building tag database')  
     def build(self, data_root, image_batch_size=8, mode=None):
         if mode == 'AIC':
             self.__build_keyframe_AIC(data_root, image_batch_size=image_batch_size)
@@ -383,7 +365,6 @@ class FAISSManager:
         limit = top_k
         distances, indices= index.search(query_vector, limit)
         hits = []
-        
         for idx, dist in zip(indices[0], distances[0]):
             if idx == -1:
                 continue
@@ -537,6 +518,20 @@ class FAISSManager:
         np.save(os.path.join(save_dir, "text_metadata.npy"), np.array(self.text_metadata))
 
         print("[INFO] Index and metadata saved.")
+    def save_tag(self, save_dir='tag_index'):
+        """
+        Save indexes and metadata
+        
+        Args:
+            save_dir: Directory to save indexes and metadata
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        self.tag_index = faiss.index_gpu_to_cpu(self.tag_index)
+        faiss.write_index(self.tag_index, os.path.join(save_dir, "tag_index.faiss"))
+
+        np.save(os.path.join(save_dir, "tag_metadata.npy"), np.array(self.tag_metadata))
+
+        print("[INFO] Index and metadata saved.")
     
     def load(self, save_dir):
         """
@@ -572,3 +567,4 @@ class FAISSManager:
         tag_index = faiss.read_index(os.path.join(save_dir, "tag_index.faiss"))
         self.tag_index = faiss.index_cpu_to_gpu(self.res, 0, tag_index)
         self.tag_metadata = np.load(os.path.join(save_dir, "tag_metadata.npy"), allow_pickle=True).tolist()
+        # print('tags:', self.tag_metadata)

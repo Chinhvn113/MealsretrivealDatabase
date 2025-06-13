@@ -507,22 +507,26 @@ class MilvusManager:
             
 if __name__ == '__main__':
     manager = MilvusManager(port = 19530, host = 'milvus-standalone')
-    tag_manager = FAISSManager(index_dir='tag_index')
+    tag_manager = FAISSManager(tag_dir='tag_index')
     # Build tag database de ho tro tag filtering + multiprocessing
-    # tag_manager.build_tag(tag_txt_file='tag.txt')
+    # tag_manager.build_tag(tag_txt_file='/root/demo_data/MealsretrivevalDatabase/tag.txt')
     # tag_manager.save_tag(save_dir='tag_index')
     # manager.reset_collection()
     # Hàm reset này không nổ gì đừng sài, nó xóa sạch dữ liệu đó :))))
     # manager.build(mode = 'AIC', data_root= '/root/demo_data/data')
     # Database build xong rồi, không nổ gì thì đừng chạy hàm build nha, nó build lại từ đầu bomboclat đó
+    
+    ##################SEARCHING TEST################################################################################
     query_A = 'A Man on a road'
-    tags_A = tag_manager.search_tag(search_in='tag', query_type='text', top_k=5)
+    tags_A = tag_manager.search_tag( query=query_A, top_k=3)
+    print('tags_A:', *tags_A)
     results = manager.search(mode='text', query=query_A, search_in = 'image', start_temporal_chain = True)
     print('Original top k query A:')
     for result in results:
         print(f"frame: {result['metadata']['frame_name']}, score: {result['score']}")
     query_B = 'A man eating a women'
-    tags_B = tag_manager.search_tag(search_in='tag', query_type='text', top_k=5)
+    tags_B = tag_manager.search_tag(query=query_B, top_k=3)
+    print('tags_B:', *tags_B)
     temporal_answer = manager.temporal_search_sequence(query_B, mode ='text')
     print('Top K query B:')
     for result in temporal_answer["keyframes_B"]:
@@ -531,18 +535,3 @@ if __name__ == '__main__':
     for result in temporal_answer["keyframe_A_reranked"]:
         print(f"frame: {result['metadata']['frame_name']}, temporal score: {result['temporal_score']}")
 
-        # Test similarity calculation
-    # text1 = "A man walking on the road"
-    # text2 = "Person walking on street"
-    # text3 = "Cat sitting on chair"
-
-    # emb1 = manager.encode_image('/root/demo_data/data/L01_V001/frame_545.webp')
-    # emb2 = manager.encode_image('/root/demo_data/data/L01_V001/frame_542.webp')
-    # emb3 = manager.encode_image('/root/demo_data/data/L01_V001/frame_543.webp')
-
-    # # # Calculate cosine similarity manually
-    # def cosine_similarity(a, b):
-    #     return np.dot(a, b) 
-
-    # print(f"Similarity text1-text2: {cosine_similarity(emb1, emb2)}")
-    # print(f"Similarity text1-text3: {cosine_similarity(emb1, emb3)}")

@@ -1,0 +1,69 @@
+Metadata-Version: 2.4
+Name: database
+Version: 0.1.0
+Summary: A metadata construction and FAISS indexing library.
+Home-page: https://github.com/Chinhvn113/MealsretrivevalDatabase.git
+Author: Chinhcachep
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Description-Content-Type: text/markdown
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: transformers==4.49
+Requires-Dist: Pillow
+Requires-Dist: faiss-gpu
+Requires-Dist: tqdm
+Requires-Dist: numpy<2.0
+Requires-Dist: transformers
+Requires-Dist: einops
+Requires-Dist: timm
+Requires-Dist: accelerate
+Requires-Dist: bitsandbytes
+Requires-Dist: scikit-learn
+Requires-Dist: scipy
+Requires-Dist: pandas
+Requires-Dist: pymilvus
+Requires-Dist: qdrant-client
+Requires-Dist: fairscale
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: summary
+
+First clone RAM plus plus repo:
+```bash
+git clone https://github.com/xinyu1205/recognize-anything.git
+cd recognize-anything
+pip install -e .
+```
+After that install database library
+```bash
+cd ..
+cd MealsretrivevalDatabase
+pip install -e .
+```
+Download the weights:
+```bash
+apt-get install git-lfs
+git lfs install
+git clone https://huggingface.co/xinyu1205/recognize-anything-plus-model
+```
+Download test keyframes
+```bash
+pip install gdown
+gdown --fuzzy https://drive.google.com/file/d/1LKZHyhjhLGnbQHXXBN7CjrFD2npN95mw/view
+unzip toidayyy.zip
+```
+Simple use:
+```python
+from database import FAISSManager, set_all_seeds, build_transform, dynamic_preprocess, load_image
+set_all_seeds(42)
+faissmanager = FAISSManager()
+faissmanager.build('data/root')
+result = faissmanager.search(query_type = 'text', query ='hello world')
+```
+
+

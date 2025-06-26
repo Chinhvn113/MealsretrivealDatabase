@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 import torch
@@ -8,93 +7,138 @@ import json
 import faiss
 from tqdm import tqdm
 from transform import load_image
-
-
-
-
-
+from sentence_transformers import SentenceTransformer
+from time import time
 class FAISSManager:
     def __init__(
-        self, 
-        embedding_dim=1024, 
-        device=None, 
-        index_dir=None, 
+        self,
+        embedding_dim=1024,
+        device=None,
+        index_dir=None,
         tag_dir=None,
-        model_path="jinaai/jina-clip-v2", 
+        model_path="jinaai/jina-clip-v2",
         image_size=384,
         max_num=12,
+        database_mode='nvidia_aic'  # Default mode, can be overridden
         ):
         """
         Initialize the FAISS Manager for both building and retrieving from FAISS indexes
-        
+
         Args:
             embedding_dim: Dimension of the embedding vectors
             device: Device to use for model inference ('cuda' or 'cpu')
             index_dir: Directory containing existing indexes to load (optional)
+            tag_dir: Directory containing existing tag index to load (optional)
+            model_path: Path to the vision-language model
+            image_size: Size to which images are resized
+            max_num: Max number of search results (not used consistently, consider removing)
         """
         print("[DEBUG] Initializing FAISSManager")
-        
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        self.embedding_dim = embedding_dim
-        self.image_size = image_size
-        self.max_num = max_num
-        # Load CLIP model
-        self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True).half()
-        self.model.to(self.device)
-        self.model.eval()
+        if database_mode == 'nvidia_aic':
+            self.model= SentenceTransformer(model_path, device=device)
+            self.embedding_dim = 384
+            self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+            self.embedding_dim = embedding_dim
+            self.image_size = image_size
+            self.max_num = max_num
+            # self.database_mode = None  # To be set by the build method
+
+            # Load CLIP model
+            self.model = AutoModel.from_pretrained(model_path, trust_remote_code=True).half()
+            self.model.to(self.device)
+            self.model.eval()
+
         # Initialize FAISS indexes
-        # resource = faiss.StandardGpuResources()
-        # image_index_cpu = faiss.IndexFlatIP(self.embedding_dim)
-        # text_index_cpu = faiss.IndexFlatIP(self.embedding_dim)
-        # mean_pooling_cpu = faiss.IndexFlatIP(self.embedding_dim)
-        # self.image_index = faiss.index_cpu_to_gpu(resource, device = self.device,  index =image_index_cpu)
-        # self.text_index = faiss.index_cpu_to_gpu(resource, device = self.device, index = text_index_cpu)
-        # self.mean_pooling_image_index = faiss.index_cpu_to_gpu(resource,device = self.device,  index = mean_pooling_cpu )
         try:
             self.res = faiss.StandardGpuResources()
             self.image_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
             self.text_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
             self.mean_pooling_image_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
             self.tag_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim)
-        except:
+            self.fewshot_index = faiss.GpuIndexFlatIP(self.res, self.embedding_dim) # New index for few-shot
+        except Exception:
+            print("[WARNING] No GPU found for FAISS. Falling back to CPU.")
             self.image_index = faiss.IndexFlatIP(self.embedding_dim)
             self.text_index = faiss.IndexFlatIP(self.embedding_dim)
             self.mean_pooling_image_index = faiss.IndexFlatIP(self.embedding_dim)
-            self.tag_index = faiss.IndexFlatIP(self.res, self.embedding_dim)
-        
+            self.tag_index = faiss.IndexFlatIP(self.embedding_dim)
+            self.fewshot_index = faiss.IndexFlatIP(self.embedding_dim) # New index for few-shot
+
         # Metadata mapping
         self.image_metadata = []
         self.text_metadata = []
         self.mean_pooling_image_metadata = []
         self.tag_metadata = []
+        self.fewshot_metadata = [] # New metadata list for few-shot
+
         # Load existing indexes if provided
         if index_dir and os.path.exists(index_dir):
             self.load(index_dir)
         if tag_dir and os.path.exists(tag_dir):
             self.load_tag(tag_dir)
+
     def encode_image(self, image_path):
         """Encode a single image"""
-        emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]#, truncate_dim=self.embedding_dim)[0]
+        emb = self.model.encode_image([image_path], truncate_dim=self.embedding_dim)[0]
         return emb / np.linalg.norm(emb)
-    
+
     def encode_image_batch(self, image_paths, batch_size=8):
         """Encode a batch of images"""
         all_embeddings = []
         for i in range(0, len(image_paths), batch_size):
             batch = image_paths[i:i+batch_size]
-            emb = self.model.encode_image(batch, truncate_dim=self.embedding_dim)#, truncate_dim=self.embedding_dim)
+            emb = self.model.encode_image(batch, truncate_dim=self.embedding_dim)
             emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
             all_embeddings.append(emb)
         return np.vstack(all_embeddings)
-    
+
     def encode_text(self, text):
         """Encode text"""
         if isinstance(text, str):
             text = [text]
-        emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)#, truncate_dim=self.embedding_dim)
+        emb = self.model.encode_text(text, truncate_dim=self.embedding_dim)
         emb = emb / np.linalg.norm(emb, axis=1, keepdims=True)
         return emb[0] if len(text) == 1 else emb
-    
+
+    def __build_nvidia_aic(self, json_path):
+        """
+        Builds a text-based database from an Nvidia AIC-style few-shot instruction dataset.
+        This method is private and called by the main `build` method.
+
+        Args:
+            json_path (str): The path to the JSON file containing the dataset.
+        """
+        print(f"Building few-shot database from: {json_path}")
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            raise ValueError("Expected the JSON file to contain a list of objects.")
+        existed_queries = set()
+        for item in tqdm(data, desc="Processing few-shot queries"):
+            query_text = item.get("query", "").strip()
+            if not query_text or query_text in existed_queries:
+                continue
+            existed_queries.add(query_text)
+
+            try:
+                # Encode the query text
+                embedding = self.model.encode(query_text, convert_to_numpy=True, normalize_embeddings=True)
+
+                # Add embedding to the FAISS index
+                self.fewshot_index.add(np.expand_dims(embedding.astype(np.float32), axis=0))
+
+                # Store the entire original item as metadata
+                self.fewshot_metadata.append(item)
+
+            except Exception as e:
+                print(f"[ERROR] Error processing query '{query_text}': {e}")
+
+        print(f"Inserted {self.fewshot_index.ntotal} instruction queries into the few-shot index.")
+
+
     def __build_roomelsa(self, data_root, image_batch_size=8):
         """
         Build FAISS indexes from dataset directory
@@ -106,13 +150,6 @@ class FAISSManager:
         object_dirs = [os.path.join(data_root, object) for object in os.listdir(data_root) 
                      if os.path.isdir(os.path.join(data_root, object))]
         print('object dirs:', object_dirs[:5])
-        
-        # object_dirs = []
-        # for room in room_dirs:
-        #     object_dirs += [os.path.join(room, obj) for obj in os.listdir(room) 
-        #                    if os.path.isdir(os.path.join(room, obj))]
-        
-        # print('Object full dirs:', object_dirs[:5])
         
         for obj_dir in tqdm(object_dirs, desc="Processing objects"):
             obj_name = os.path.basename(obj_dir)
@@ -139,13 +176,11 @@ class FAISSManager:
                 for embed in img_embeds:
                     self.image_index.add(np.expand_dims(embed.astype(np.float32), axis=0))
                     self.image_object_dirs.append(obj_name)
-                    # self.image_object_root.append(obj_dir)
                 
                 mean_img_embed = np.mean(img_embeds, axis=0)
                 mean_img_embed = mean_img_embed / np.linalg.norm(mean_img_embed)
                 self.mean_pooling_image_index.add(np.expand_dims(mean_img_embed.astype(np.float32), axis=0))
                 self.mean_pooling_image_dirs.append(obj_name)
-                # self.mean_pooling_image_root.append(obj_dir)
             
             text_files = [f for f in os.listdir(obj_dir) if f.lower().endswith(".txt")]
             if text_files:
@@ -157,7 +192,6 @@ class FAISSManager:
                             text_embed = self.encode_text(text)
                             self.text_index.add(np.expand_dims(text_embed.astype(np.float32), axis=0))
                             self.text_object_dirs.append(obj_name)
-                            # self.text_object_root.append(obj_dir)
                 except Exception as e:
                     print(f"[WARNING] Failed to read text for {obj_name}: {e}")
         
@@ -326,37 +360,71 @@ class FAISSManager:
                     self.tag_metadata.append(tag_metadata)
                 except:
                     raise ValueError('[ERROR] Failed building tag database')  
+    
     def build(self, data_root, image_batch_size=8, mode=None):
+        """
+        Builds the FAISS database from a data source based on the specified mode.
+
+        Args:
+            data_root (str): The path to the data source. This is a directory for modes
+                             'AIC', 'ACM', and 'roomelsa', but a path to a JSON file
+                             for 'nvidia_aic' mode.
+            image_batch_size (int): Batch size for encoding images (if applicable).
+            mode (str): The build mode. One of 'AIC', 'ACM', 'roomelsa', 'nvidia_aic'.
+        """
+        self.database_mode = mode
         if mode == 'AIC':
             self.__build_keyframe_AIC(data_root, image_batch_size=image_batch_size)
         elif mode == 'ACM':
             self.__build_keyframe_ACM(data_root, image_batch_size=image_batch_size)
         elif mode == 'roomelsa':
             self.__build_roomelsa(data_root, image_batch_size=image_batch_size)
+        elif mode == 'nvidia_aic':
+            self.__build_nvidia_aic(data_root) # data_root is the json_path
         else:
-            raise ValueError("Invalid mode. Choose 'AIC', 'ACM', or 'roomelsa'.")
-            
-    
-    def add(self, embeddings, object_dirs, target="image"):
+            raise ValueError("Invalid mode. Choose 'AIC', 'ACM', 'roomelsa', or 'nvidia_aic'.")
+
+    def search_fewshot(self, query: str, top_k: int = 5):
         """
-        Add embeddings to specified index
-        
+        Search the fewshot_retrieve collection using a natural language query.
+
         Args:
-            embeddings: np.array of shape (N, D)
-            object_dirs: list of metadata strings (same length as embeddings)
-            target: 'image', 'text', or 'mean pooling images'
+            query (str): User query string.
+            top_k (int): Number of similar queries to retrieve.
+
+        Returns:
+            List[Dict]: Each result with keys: 'query', 'explanation', 'visual_checks', 'spatial_instructions', 'score'
         """
-        if len(embeddings.shape) == 1:
-            embeddings = embeddings[np.newaxis, :]
-        
-        if target == "image":
-            self.image_index.add(embeddings)
-            # self.image_object_dirs.extend(object_dirs)
-        elif target == "text":
-            self.text_index.add(embeddings)
-            # self.text_object_dirs.extend(object_dirs)
-        else:
-            raise ValueError("target must be 'image', 'text', or 'mean pooling images'")
+        # if self.database_mode != "nvidia_aic":
+        #     raise ValueError("search_fewshot can only be used when the database is built in 'nvidia_aic' mode.")
+
+        if self.fewshot_index.ntotal == 0:
+            print("[WARNING] The few-shot index is empty. No search can be performed.")
+            return []
+
+        query_vector = self.model.encode(query, convert_to_numpy=True, normalize_embeddings=True)
+        query_vector = np.expand_dims(query_vector.astype(np.float32), axis=0)
+
+        distances, indices = self.fewshot_index.search(query_vector, top_k)
+
+        formatted_results = []
+        if len(indices) > 0:
+            for idx, dist in zip(indices[0], distances[0]):
+                if idx == -1: # FAISS returns -1 for no result
+                    continue
+                
+                meta = self.fewshot_metadata[idx]
+                #check if retrived metadata query exists (only retrieved once for each query)                 
+                formatted_results.append({
+                    "query": meta.get("query", ""),
+                    "explanation": meta.get("explanation", ""),
+                    "visual_checks": meta.get("visual_checks", []),
+                    "spatial_instructions": meta.get("spatial_instructions", []),
+                    "score": float(dist)
+                })
+
+        return formatted_results
+
     def search_tag(self, query, top_k=5, return_answer_vector=False):
         query_vector = self.encode_text(query)
         query_vector = query_vector[np.newaxis, :]
@@ -368,7 +436,8 @@ class FAISSManager:
         for idx, dist in zip(indices[0], distances[0]):
             if idx == -1:
                 continue
-            hits.append(object_dirs[idx]['tag_text'])
+            if object_dirs[idx]['tag_text'] in query.lower():
+                hits.append(object_dirs[idx]['tag_text'])
         return hits
         
     def search(self, query, query_type="text", top_k=5, search_in="image", return_answer_vector=False):
@@ -501,70 +570,137 @@ class FAISSManager:
     
     def save(self, save_dir):
         """
-        Save indexes and metadata
-        
+        Save all indexes and metadata to a directory.
+
         Args:
-            save_dir: Directory to save indexes and metadata
+            save_dir: Directory to save the files.
         """
         os.makedirs(save_dir, exist_ok=True)
-        self.image_index = faiss.index_gpu_to_cpu(self.image_index)
-        self.text_index = faiss.index_gpu_to_cpu(self.text_index)
-        self.mean_pooling_image_index = faiss.index_gpu_to_cpu(self.mean_pooling_image_index)
-        faiss.write_index(self.image_index, os.path.join(save_dir, "image_index.faiss"))
-        faiss.write_index(self.text_index, os.path.join(save_dir, "text_index.faiss"))
-        # faiss.write_index(self.mean_pooling_image_index, os.path.join(save_dir, "mean_image_index.faiss"))
-        
-        np.save(os.path.join(save_dir, "image_metadata.npy"), np.array(self.image_metadata))
-        np.save(os.path.join(save_dir, "text_metadata.npy"), np.array(self.text_metadata))
 
-        print("[INFO] Index and metadata saved.")
+        # Helper function to convert to CPU index if it's a GpuIndex
+        def to_cpu(index):
+            if hasattr(faiss, 'GpuIndex') and isinstance(index, faiss.GpuIndex):
+                return faiss.index_gpu_to_cpu(index)
+            return index
+
+        # Save main indexes
+        faiss.write_index(to_cpu(self.image_index), os.path.join(save_dir, "image_index.faiss"))
+        faiss.write_index(to_cpu(self.text_index), os.path.join(save_dir, "text_index.faiss"))
+        np.save(os.path.join(save_dir, "image_metadata.npy"), np.array(self.image_metadata, dtype=object))
+        np.save(os.path.join(save_dir, "text_metadata.npy"), np.array(self.text_metadata, dtype=object))
+
+        # Save few-shot index if it has data
+        if self.fewshot_index.ntotal > 0:
+            faiss.write_index(to_cpu(self.fewshot_index), os.path.join(save_dir, "fewshot_index.faiss"))
+            np.save(os.path.join(save_dir, "fewshot_metadata.npy"), np.array(self.fewshot_metadata, dtype=object))
+
+        # Save a config file with the mode
+        with open(os.path.join(save_dir, 'config.json'), 'w') as f:
+            json.dump({'database_mode': self.database_mode}, f)
+
+        print(f"[INFO] All indexes and metadata saved to {save_dir}.")
+
     def save_tag(self, save_dir='tag_index'):
         """
-        Save indexes and metadata
+        Save tag index and metadata.
         
         Args:
-            save_dir: Directory to save indexes and metadata
+            save_dir: Directory to save the tag files.
         """
         os.makedirs(save_dir, exist_ok=True)
-        self.tag_index = faiss.index_gpu_to_cpu(self.tag_index)
-        faiss.write_index(self.tag_index, os.path.join(save_dir, "tag_index.faiss"))
-
-        np.save(os.path.join(save_dir, "tag_metadata.npy"), np.array(self.tag_metadata))
-
-        print("[INFO] Index and metadata saved.")
+        def to_cpu(index):
+            if hasattr(faiss, 'GpuIndex') and isinstance(index, faiss.GpuIndex):
+                return faiss.index_gpu_to_cpu(index)
+            return index
+        faiss.write_index(to_cpu(self.tag_index), os.path.join(save_dir, "tag_index.faiss"))
+        np.save(os.path.join(save_dir, "tag_metadata.npy"), np.array(self.tag_metadata, dtype=object))
+        print(f"[INFO] Tag index and metadata saved to {save_dir}.")
     
     def load(self, save_dir):
         """
-        Load indexes and metadata
-        
+        Load all indexes and metadata from a directory.
+
         Args:
-            save_dir: Directory containing indexes and metadata
+            save_dir: Directory containing the saved files.
         """
+        if not os.path.isdir(save_dir):
+            print(f"[ERROR] Load directory not found: {save_dir}")
+            return
+            
+        # Helper to load to GPU if available
+        def to_gpu(cpu_index):
+            if self.device == 'cuda' and hasattr(self, 'res'):
+                return faiss.index_cpu_to_gpu(self.res, 0, cpu_index)
+            return cpu_index
+
+        # Load main indexes and metadata
         try:
-            # Load indexes
-
-            image_index = faiss.read_index(os.path.join(save_dir, "image_index.faiss"))
-            text_index = faiss.read_index(os.path.join(save_dir, "text_index.faiss"))
-
-            self.image_index = faiss.index_cpu_to_gpu(self.res, 0, image_index)
-            self.text_index = faiss.index_cpu_to_gpu(self.res, 0, text_index)
+            image_index_path = os.path.join(save_dir, "image_index.faiss")
+            if os.path.exists(image_index_path):
+                self.image_index = to_gpu(faiss.read_index(image_index_path))
+                self.image_metadata = np.load(os.path.join(save_dir, "image_metadata.npy"), allow_pickle=True).tolist()
             
-
+            text_index_path = os.path.join(save_dir, "text_index.faiss")
+            if os.path.exists(text_index_path):
+                self.text_index = to_gpu(faiss.read_index(text_index_path))
+                self.text_metadata = np.load(os.path.join(save_dir, "text_metadata.npy"), allow_pickle=True).tolist()
             
-            # Load metadata
-            self.image_metadata = np.load(os.path.join(save_dir, "image_metadata.npy"), allow_pickle=True).tolist()
-            self.text_metadata = np.load(os.path.join(save_dir, "text_metadata.npy"), allow_pickle=True).tolist()
+            # Load few-shot index and metadata if they exist
+            fewshot_index_path = os.path.join(save_dir, "fewshot_index.faiss")
+            if os.path.exists(fewshot_index_path):
+                self.fewshot_index = to_gpu(faiss.read_index(fewshot_index_path))
+                self.fewshot_metadata = np.load(os.path.join(save_dir, "fewshot_metadata.npy"), allow_pickle=True).tolist()
 
-            print("[INFO] Index and metadata loaded successfully.")
+            # Load the config
+            config_path = os.path.join(save_dir, 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    self.database_mode = config.get('database_mode')
+
+            print(f"[INFO] Indexes and metadata loaded successfully from {save_dir}. Mode: {self.database_mode}")
+
         except Exception as e:
-            self.image_index = faiss.read_index(os.path.join(save_dir, "image_index.faiss"))
-            self.text_index = faiss.read_index(os.path.join(save_dir, "text_index.faiss"))
+            print(f"[ERROR] Failed to load indexes from {save_dir}: {e}")
 
-            self.image_object_dirs = np.load(os.path.join(save_dir, "image_object_dirs.npy"), allow_pickle=True).tolist()
-            self.text_metadata = np.load(os.path.join(save_dir, "metadata.npy"), allow_pickle=True).tolist()
-    
     def load_tag(self, save_dir='tag_index'):
-        tag_index = faiss.read_index(os.path.join(save_dir, "tag_index.faiss"))
-        self.tag_index = faiss.index_cpu_to_gpu(self.res, 0, tag_index)
-        self.tag_metadata = np.load(os.path.join(save_dir, "tag_metadata.npy"), allow_pickle=True).tolist()
-        # print('tags:', self.tag_metadata)
+        """
+        Load tag index and metadata.
+
+        Args:
+            save_dir: Directory containing the tag files.
+        """
+        if not os.path.isdir(save_dir):
+            print(f"[ERROR] Tag load directory not found: {save_dir}")
+            return
+
+        def to_gpu(cpu_index):
+            if self.device.type == 'cuda' and hasattr(self, 'res'):
+                return faiss.index_cpu_to_gpu(self.res, 0, cpu_index)
+            return cpu_index
+            
+        try:
+            tag_index_path = os.path.join(save_dir, "tag_index.faiss")
+            if os.path.exists(tag_index_path):
+                self.tag_index = to_gpu(faiss.read_index(tag_index_path))
+                self.tag_metadata = np.load(os.path.join(save_dir, "tag_metadata.npy"), allow_pickle=True).tolist()
+                print(f"[INFO] Tag index loaded from {save_dir}.")
+        except Exception as e:
+            print(f"[ERROR] Failed to load tag index: {e}")
+
+if __name__ == "__main__":
+    # Example usage
+    manager = FAISSManager(device='cuda', model_path='sentence-transformers/paraphrase-MiniLM-L6-v2', database_mode='nvidia_aic')
+    # manager.build(mode='nvidia_aic', data_root='/root/demo_data/MealsretrivevalDatabase/batch_4_refined.json')
+    # manager.save('/root/demo_data/PhysicalAI_Dataset/indexes')
+    manager.load('/root/demo_data/PhysicalAI_Dataset/indexes')
+    start_time = time()
+    results = manager.search_fewshot("From this viewpoint, does the pallet <region0> appear on the left-hand side of the pallet <region1>?", top_k=5)
+    end_time = time()
+    print(f"Search completed in {end_time - start_time:.2f} seconds")
+    for res in results:
+        print(f"Query: {res['query']}, Score: {res['score']}")
+        print(f"Explanation: {res['explanation']}")
+        print(f"Visual Checks: {res['visual_checks']}")
+        print(f"Spatial Instructions: {res['spatial_instructions']}")
+        

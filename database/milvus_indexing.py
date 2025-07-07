@@ -473,11 +473,13 @@ class MilvusManager:
 
         batch_texts = []
         batch_metadatas = []
-
+        know_queries = set()  # To avoid duplicate queries
         for item in data:
             query_text = item.get("query", "").strip()
-            if not query_text:
+            if not query_text or query_text in know_queries:
                 continue
+                # if not query_text:
+                #     continue
             batch_texts.append(query_text)
             batch_metadatas.append(item)
 
@@ -823,16 +825,17 @@ class MilvusManager:
             
 if __name__ == '__main__':
     manager = MilvusManager(port = 19530, host = 'milvus-standalone', database_mode='nvidia_aic')
-    manager.build(data_root='/root/demo_data/MealsretrivevalDatabase/batch_4_refined.json', mode='nvidia_aic')
+    # manager.reset_collection()
+    # manager.build(data_root='/root/demo_data/MealsretrivevalDatabase/batch_4_refined.json', mode='nvidia_aic')
     # manager.ensure_collection_loaded()
-    # query='Considering the pallets <region0> <region1> <region2> <region3> <region4> <region5> <region6> <region7> <region8>, what is the total number of pallets in the left buffer region among <region9> <region10> <region11>?'
-    # results = manager.search_fewshot(query)
-    # for result in results:
-    #     print(f"Query: {result['query']}")
-    #     print(f"Explanation: {result['explanation']}")
-    #     print(f"Visual Checks: {result['visual_checks']}")
-    #     print(f"Spatial Instructions: {result['spatial_instructions']}")
-    #     print(f"Score: {result['score']:.4f}\n")
+    query='Considering the pallets <region0> <region1> <region2> <region3> <region4> <region5> <region6> <region7> <region8>, what is the total number of pallets in the right buffer region among <region9> <region10> <region11>?'
+    results = manager.search_fewshot(query)
+    for result in results:
+        print(f"Query: {result['query']}")
+        print(f"Explanation: {result['explanation']}")
+        print(f"Visual Checks: {result['visual_checks']}")
+        print(f"Spatial Instructions: {result['spatial_instructions']}")
+        print(f"Score: {result['score']:.4f}\n")
     # tag_manager = FAISSManager(tag_dir='tag_index')
     # manager.reset_collection()
     # manager.build(data_root='/root/demo_data/data', mode='AIC')
